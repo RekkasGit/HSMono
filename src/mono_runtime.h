@@ -35,13 +35,13 @@
     X(mono_domain_set)                   \
     X(mono_domain_create_appdomain)      \
     X(mono_domain_unload)                \
+    X(mono_domain_set_config)            \
     X(mono_domain_assembly_open)         \
     /* classes, objects and calls */     \
     X(mono_assembly_get_image)           \
     X(mono_class_from_name)              \
     X(mono_class_get_method_from_name)   \
     X(mono_object_new)                   \
-    X(mono_runtime_object_init)          \
     X(mono_runtime_invoke)               \
     X(mono_gchandle_new)                 \
     X(mono_gchandle_free)                \

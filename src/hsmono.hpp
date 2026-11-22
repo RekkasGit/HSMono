@@ -1,20 +1,26 @@
 #pragma once
+// Shared by hsmono's sources, as MQ2MonoShared.h is by MQ2Mono's:
+//   hsmono.cpp        the plugin's hooks, /mono, and the MonoCore.Core internal calls (MQ2Mono.cpp)
+//   hsmono_imgui.cpp  the MonoCore.E3ImGUI internal calls (MQ2MonoImGui.cpp)
+//   app_domains.cpp   loading and unloading scripts, and every call into C# (InitAppDomain, UnloadAppDomain)
+//   mono_runtime.cpp  finding and starting Mono; mono_loader.cpp its OS calls
 #include "hailstone_plugin.h"
 #include "hailstone_plugin.hpp"
 #include "mono_runtime.h"   // Mono's types, and its functions through `mono` (no import library is linked)
 #include <stdlib.h>
 #include <string.h>
-#include <deque>
-#include <string>
-#include <chrono>
-#include <map>
 #include <algorithm>    // std::equal in ci_equals
 #include <array>        // std::array in m_IMGUI_InputColorValues
 #include <chrono>
+#include <cstdint>
 #include <deque>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>  // ci_equals' parameters
+
+// The MQ2Mono version this port follows: /mono version, and mq_GetMQ2MonoVersion for the C# side.
+inline constexpr const char* kHsMonoVersion = "0.426";
 
 inline bool ci_equals(std::string_view a, std::string_view b) {
 	auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; };
@@ -22,10 +28,14 @@ inline bool ci_equals(std::string_view a, std::string_view b) {
 		[&](char x, char y) { return lower(x) == lower(y); });
 }
 
-// Shared data structures and globals used across MQ2Mono compilation units
-
+// One running script: a C# assembly in an app domain of its own.
 struct monoAppDomainInfo
 {
+	monoAppDomainInfo() = default;
+	// Its commands capture `this`: it must stay where the map put it.
+	monoAppDomainInfo(const monoAppDomainInfo&) = delete;
+	monoAppDomainInfo& operator=(const monoAppDomainInfo&) = delete;
+
 	std::string m_appDomainName;
 	// app domain we have created for e3
 	MonoDomain* m_appDomain = nullptr;
@@ -35,6 +45,7 @@ struct monoAppDomainInfo
 	MonoClass* m_classInfo = nullptr;
 	MonoObject* m_classInstance = nullptr;
 	uint32_t m_classInstanceHandle = 0; // a pinned GC handle: keeps m_classInstance alive and where it is
+	bool m_exceptionReported = false;   // the first exception out of C# is reported, then no more (OnPulse runs every frame)
 	// methods that we call in C# if they are available
 	MonoMethod* m_OnPulseMethod = nullptr;
 	MonoMethod* m_OnSpawnAdd = nullptr;
@@ -61,68 +72,51 @@ struct monoAppDomainInfo
 	std::chrono::steady_clock::time_point m_delayTimer = std::chrono::steady_clock::now(); // the time this was issued + m_delayTime
 	std::deque<std::string> m_CommandList;
 
-	bool AddScriptCommand(std::string commandName)
-	{
-
-		if (host->command_exists(host->host, commandName.c_str()) == HAILSTONE_COMMAND_NONE)
-		{
-			m_CommandList.push_back(commandName);
-			hs::AddCommand(commandName, [this, commandName](const char* args)
-				{
-					if (this->m_appDomain)
-					{
-						if (this->m_OnCommand)
-						{
-							std::string line = args;
-							line = commandName + " " + line;
-							mono.mono_domain_set(this->m_appDomain, false);
-							MonoString* monoLine = mono.mono_string_new(this->m_appDomain, line.c_str());
-							void* params[1] =
-							{
-								monoLine
-							};
-							mono.mono_runtime_invoke(this->m_OnCommand, this->m_classInstance, params, nullptr);
-						}
-					}
-				});
-
-
-			return true;
-		}
-		return false;
-	}
-
-	void RemoveCommand(std::string command)
-	{
-		int count = 0;
-		int processCount = static_cast<int>(this->m_CommandList.size());
-		while (count < processCount)
-		{
-			count++;
-			std::string currentKey = this->m_CommandList.front();
-			m_CommandList.pop_front();
-			if (!ci_equals(currentKey, command))
-			{
-				m_CommandList.push_back(currentKey);
-			}
-			else
-			{
-				hs::RemoveCommand(currentKey.c_str());
-			}
-		}
-	}
-
-	void ClearCommands()
-	{
-		while (this->m_CommandList.size() > 0)
-		{
-			//mq::RemoveCommand(m_CommandList.front().c_str());
-			m_CommandList.pop_front();
-		}
-	}
-	hs::Commands commands_;// last: its commands go before the members they capture, also prevents  the compiler from letting this move at all, so a safey check.
+	// mq_AddCommand: a command that runs the script's OnCommand with the whole line. False when the name is taken
+	// (the game's, the client's, another plugin's or another script's). app_domains.cpp.
+	bool AddScriptCommand(const std::string& commandName);
+	// mq_RemoveCommand, mq_ClearCommands; ClearCommands also when the script unloads.
+	void RemoveCommand(const std::string& command);
+	void ClearCommands();
 };
 
-// Globals defined in MQ2Mono.cpp, used by ImGui wrappers
+// app_domains.cpp
 extern std::map<std::string, monoAppDomainInfo> monoAppDomains;
 extern std::map<MonoDomain*, std::string> monoAppDomainPtrToString;
+extern std::deque<std::string> appDomainProcessQueue; // a revolving list of who is valid to process
+// hsmono.cpp
+extern bool previousCommand; // a command was issued on this pulse
+
+// ---- app_domains.cpp
+
+// Calls one of a script's methods in the script's domain, then makes the domain that was current before current again
+// (a script's command may run inside another script's call). An exception thrown in C# is caught and reported here
+// (`what` names the method), never left to Mono's unhandled-exception handler. Empty when it threw, else the method's
+// result (null for void). A null method is not called.
+std::optional<MonoObject*> Invoke(monoAppDomainInfo& script, MonoMethod* method, const char* what, void** params = nullptr);
+
+// The script whose code is running (mono_domain_get), for the internal calls: null from the root domain.
+monoAppDomainInfo* CurrentScript();
+
+// True while C# code is running: a script can't be loaded or unloaded then, since its domain may be the one running.
+bool InScriptCall();
+
+// A name the player typed, as a script name (letters, digits, '_', '-', '.'; a trailing ".dll" dropped), or empty.
+std::optional<std::string> ScriptName(std::string_view typed);
+
+// /mono load: copies <plugin folder>/macros/<name>/ into its <character>/ folder and loads <name>.dll from there into a
+// new app domain (InitAppDomain). A running script of that name is unloaded first. In game only. Empty on success.
+std::optional<std::string> LoadScript(const std::string& name);
+
+// /mono unload: OnStop, its commands, its domain (UnloadAppDomain). False when no such script runs.
+bool UnloadScript(std::string_view name);
+void UnloadAllScripts();
+
+// ---- internal calls
+
+// A C# method declared [MethodImpl(MethodImplOptions.InternalCall)] runs the C++ function registered for its
+// "Namespace.Class::Method". Mono takes the function as const void*, which C++ does not convert to on its own.
+#define HSMONO_ICALL(name, fn) mono.mono_add_internal_call(name, reinterpret_cast<const void*>(&fn))
+
+// hsmono_imgui.cpp: the MonoCore.E3ImGUI internal calls, from RegisterInternalCalls.
+void RegisterImGuiInternalCalls();

@@ -3,6 +3,8 @@ project(HSMono LANGUAGES C CXX)
 
 add_library(HSMono SHARED
     src/hsmono.cpp
+    src/hsmono_imgui.cpp
+    src/app_domains.cpp
     src/mono_loader.cpp
     src/mono_runtime.cpp
 )
