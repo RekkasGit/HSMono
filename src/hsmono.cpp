@@ -321,8 +321,12 @@ unsigned char* mono_GetAvilableDiscIds(int32_t* bufferLength) {
     return availableDiscIds;
 }
 
-// mq_GetMQ2MonoVersion: this plugin's version, kHsMonoVersion (E3 parses it as a decimal, in en-US). Asks nothing of the
-// client, so any thread may call it.
+// mq_GetHSMonoVersion: this plugin's version, kHsMonoVersion. HSMono's own name for it; new scripts call this one.
+// Asks nothing of the client, so any thread may call it.
+MonoString* mono_GetHSMonoVersion() { return NewString(kHsMonoVersion); }
+
+// mq_GetMQ2MonoVersion: legacy, for scripts written for MQ2Mono (E3 among them, which parses it as a decimal in
+// en-US). The same answer as mq_GetHSMonoVersion.
 MonoString* mono_GetMQ2MonoVersion() { return NewString(kHsMonoVersion); }
 
 } // namespace
@@ -360,7 +364,8 @@ void RegisterInternalCalls() {
     // HSMONO_ICALL("MonoCore.Core::mq_GetRunNextCommand", mono_GetRunNextCommand);
     // HSMONO_ICALL("MonoCore.Core::mq_GetFocusedWindowName", mono_GetFocusedWindowName);
     // HSMONO_ICALL("MonoCore.Core::mono_GetHoverWindowName", mono_GetHoverWindowName);
-    HSMONO_ICALL("MonoCore.Core::mq_GetMQ2MonoVersion", mono_GetMQ2MonoVersion);
+    HSMONO_ICALL("MonoCore.Core::mq_GetMQ2MonoVersion", mono_GetMQ2MonoVersion);   // legacy: mq_GetHSMonoVersion
+    HSMONO_ICALL("MonoCore.Core::mq_GetHSMonoVersion", mono_GetHSMonoVersion);   // HSMono's own
 
     // HSMONO_ICALL("MonoCore.Core::mq_ExecuteCommandByName", mono_ExecuteCommandByName);
     // HSMONO_ICALL("MonoCore.Core::mq_ExecuteCommand", mono_ExecuteCommand);
