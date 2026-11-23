@@ -20,8 +20,10 @@
 #include <string>
 #include <string_view>  // ci_equals' parameters
 
-// The MQ2Mono version this port follows: /mono version, and mq_GetMQ2MonoVersion for the C# side.
-inline constexpr const char* kHsMonoVersion = "0.426";
+// HSMono's version: /mono version, and mq_GetMQ2MonoVersion for the C# side. It counts from 10.0, above every MQ2Mono
+// version (0.442 at this port), so a script's checks for an MQ2Mono feature (E3's _MQ2MonoVersion >= 0.422m ...) pass;
+// a feature not ported yet is a missing internal call, not a version a script can test.
+inline constexpr const char* kHsMonoVersion = "10.0";
 
 inline bool ci_equals(std::string_view a, std::string_view b) {
 	auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; };

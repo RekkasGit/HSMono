@@ -7,8 +7,10 @@
 #include "hsmono.hpp"
 
 #include <atomic>
+#include <cstring>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 HAILSTONE_PLUGIN
 
@@ -262,6 +264,67 @@ unsigned char* mono_GetXtargetInfo(int32_t* bufferLength) {
     return xtargetInfo;
 }
 
+// The ids of an id-and-name list (get_avail_aa_data_bulk, get_avail_disc_data_bulk) as MQ2Mono's flat list of i32
+// ids, written to `out`; the bytes written. The names are dropped: MQ2Mono's lists have none. A list longer than the
+// first read's buffer (the header's total past its count) is read once more into a buffer big enough.
+using BulkRead = int32_t (*)(void* host, unsigned char* out, int32_t out_size);
+
+int32_t IdsOf(BulkRead read, unsigned char* out, size_t outSize) {
+    std::vector<unsigned char> list(16384);   // RoF2's lists have at most 300 entries each
+    HS_BulkListHeader header{};
+    int32_t filled = 0;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        filled = read(host->host, list.data(), static_cast<int32_t>(list.size()));
+        if (filled < HS_BULK_LIST_HEADER_SIZE) return 0;   // without 'read', or no room for the header
+        std::memcpy(&header, list.data(), sizeof header);
+        if (header.count >= header.total) break;
+        list.resize(list.size() / static_cast<size_t>(header.count > 0 ? header.count : 1) *
+                        static_cast<size_t>(header.total) + 4096);
+    }
+    size_t at = HS_BULK_LIST_HEADER_SIZE, written = 0;
+    for (int32_t i = 0; i < header.count && written + sizeof(int32_t) <= outSize; ++i) {
+        if (at + HAILSTONE_ID_NAME_RECORD_SIZE > static_cast<size_t>(filled)) break;
+        HAILSTONE_ID_NAME_RECORD record;
+        std::memcpy(&record, list.data() + at, sizeof record);
+        at += HAILSTONE_ID_NAME_RECORD_SIZE + static_cast<size_t>(record.nameSize > 0 ? record.nameSize : 0);
+        std::memcpy(out + written, &record.id, sizeof record.id);
+        written += sizeof record.id;
+    }
+    return static_cast<int32_t>(written);
+}
+
+// As mq_GetXtargetInfo's, these buffers stay the scripts' to read after the call, and each call rewrites its own.
+unsigned char availableAAIds[16384];
+unsigned char availableDiscIds[16384];
+
+// mq_GetAvailableAAIds: the alternate abilities the character owns, as i32 ids (get_avail_aa_data_bulk, in the owned
+// list's order). Each id is the ability's group id, which every rank shares and the client's AA reads take.
+// NOTE: MQ2Mono wrote CAltAbilityData::ID, from a server's AscendantGetOwnedAAs export or else the client's owned
+// list; whether that is the group id or a rank id, and so whether E3's ${Me.AltAbility[id]} lookups match these, is
+// not confirmed. Hailstone has no Me.AltAbility TLO yet either (docs/scripting-reference.md).
+unsigned char* mono_GetAvailableAAIds(int32_t* bufferLength) {
+    int32_t written = 0;
+    if (MayCallHost() && HAILSTONE_HOST_HAS(host, get_avail_aa_data_bulk))
+        written = IdsOf(host->get_avail_aa_data_bulk, availableAAIds, sizeof availableAAIds);
+    if (bufferLength) *bufferLength = written;
+    return availableAAIds;
+}
+
+// mq_GetAvilableDiscIds (MQ2Mono's spelling): the character's combat abilities, as i32 spell ids
+// (get_avail_disc_data_bulk: the profile's discipline list without its empty entries, in list order). MQ2Mono listed
+// the ones the Combat Skills window shows (ShouldDisplayThisSkill); this lists every one the profile holds.
+unsigned char* mono_GetAvilableDiscIds(int32_t* bufferLength) {
+    int32_t written = 0;
+    if (MayCallHost() && HAILSTONE_HOST_HAS(host, get_avail_disc_data_bulk))
+        written = IdsOf(host->get_avail_disc_data_bulk, availableDiscIds, sizeof availableDiscIds);
+    if (bufferLength) *bufferLength = written;
+    return availableDiscIds;
+}
+
+// mq_GetMQ2MonoVersion: this plugin's version, kHsMonoVersion (E3 parses it as a decimal, in en-US). Asks nothing of the
+// client, so any thread may call it.
+MonoString* mono_GetMQ2MonoVersion() { return NewString(kHsMonoVersion); }
+
 } // namespace
 
 // mono_runtime.h. The namespace and classes are fixed by the C# side: MonoCore.Core here, MonoCore.E3ImGUI in
@@ -290,14 +353,14 @@ void RegisterInternalCalls() {
     // HSMONO_ICALL("MonoCore.Core::mq_GetTargetBuffData", mono_GetTargetBuffData);
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns3_Delta", mono_GetSpawns3_Delta);
     HSMONO_ICALL("MonoCore.Core::mq_GetXtargetInfo", mono_GetXtargetInfo);
-    // HSMONO_ICALL("MonoCore.Core::mq_GetAvailableAAIds", mono_GetAvailableAAIds);
-    // HSMONO_ICALL("MonoCore.Core::mq_GetAvilableDiscIds", mono_GetAvilableDiscIds);
+    HSMONO_ICALL("MonoCore.Core::mq_GetAvailableAAIds", mono_GetAvailableAAIds);
+    HSMONO_ICALL("MonoCore.Core::mq_GetAvilableDiscIds", mono_GetAvilableDiscIds);
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpellIds", mono_GetSpellIds);
 
     // HSMONO_ICALL("MonoCore.Core::mq_GetRunNextCommand", mono_GetRunNextCommand);
     // HSMONO_ICALL("MonoCore.Core::mq_GetFocusedWindowName", mono_GetFocusedWindowName);
     // HSMONO_ICALL("MonoCore.Core::mono_GetHoverWindowName", mono_GetHoverWindowName);
-    // HSMONO_ICALL("MonoCore.Core::mq_GetMQ2MonoVersion", mono_GetMQ2MonoVersion);
+    HSMONO_ICALL("MonoCore.Core::mq_GetMQ2MonoVersion", mono_GetMQ2MonoVersion);
 
     // HSMONO_ICALL("MonoCore.Core::mq_ExecuteCommandByName", mono_ExecuteCommandByName);
     // HSMONO_ICALL("MonoCore.Core::mq_ExecuteCommand", mono_ExecuteCommand);
