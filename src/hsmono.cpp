@@ -154,12 +154,12 @@ void RegisterInternalCalls() {
     RegisterImGuiInternalCalls();
 }
 
-HAILSTONE_EXPORT void InitializePlugin(void) {
+HAILSTONE_API void InitializePlugin(void) {
     if (!hs::AddCommand("/mono", MonoCommand)) WriteChatf("[HSMono] /mono could not be added");
     WriteChatf("[HSMono] loaded");
 }
 
-HAILSTONE_EXPORT void ShutdownPlugin(void) {
+HAILSTONE_API void ShutdownPlugin(void) {
     // Every script stops before this plugin's code goes. Mono itself stays up, unlike MQ2Mono's mono_jit_cleanup: Mono
     // can't start again in the same process, and loading the plugin again joins the running one (InitMono).
     UnloadAllScripts();
@@ -167,7 +167,7 @@ HAILSTONE_EXPORT void ShutdownPlugin(void) {
     hs::RemoveAllCommands();
 }
 
-HAILSTONE_EXPORT void OnPulse(void) {
+HAILSTONE_API void OnPulse(void) {
     if (!g_rootDomain) return;   // Mono isn't running: no /mono yet
     RunPendingMonoCommands();
     previousCommand = false;
@@ -209,12 +209,15 @@ HAILSTONE_EXPORT void OnPulse(void) {
     ++pulses;
   }
 
-HAILSTONE_EXPORT void OnZoned(void) {
+// Each script's windows (MQ2Mono's OnUpdateImGui). Needs the 'ui' capability.
+HAILSTONE_API void OnUpdateImGui(void) { RunScriptsImGui(); }
+
+HAILSTONE_API void OnZoned(void) {
     ++zones;
     WriteChatf("[HSMono] zoned");
 }
 
-HAILSTONE_EXPORT int OnIncomingChat(const char* line, uint32_t color) {
+HAILSTONE_API int OnIncomingChat(const char* line, uint32_t color) {
     (void)line;
     (void)color;
     ++chats;
@@ -222,18 +225,21 @@ HAILSTONE_EXPORT int OnIncomingChat(const char* line, uint32_t color) {
 }
 
 /* Hides lines with "spam" in them. */
-HAILSTONE_EXPORT int OnFilterChat(const char* line, uint32_t color) {
-   /* (void)color;
-    return strstr(line, "spam") != 0;*/
+HAILSTONE_API int OnFilterChat(const char* line, uint32_t color) {
+    return 0;
+    (void)color;
+    return strstr(line, "spam") != 0;
 }
 
 /* Drops incoming 0x7e57 packets; rewrites outgoing 0x7e58 to four bytes 1 2 3 4. */
-HAILSTONE_EXPORT int OnPacket(int stream, int direction, HailstonePacket* p) {
+HAILSTONE_API int OnPacket(int stream, int direction, HailstonePacket* p) {
     /*(void)stream;
     if (direction == HAILSTONE_IN && p->opcode == 0x7e57) return 1;
     if (direction == HAILSTONE_OUT && p->opcode == 0x7e58 && host->resize_packet(host->host, p, 4)) {
         static const uint8_t bytes[4] = {1, 2, 3, 4};
         memcpy(p->data, bytes, 4);
     }
-    return 0;*/
+    */
+
+    return 0;
 }

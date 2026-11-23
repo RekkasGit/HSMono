@@ -120,3 +120,5 @@ void UnloadAllScripts();
 
 // hsmono_imgui.cpp: the MonoCore.E3ImGUI internal calls, from RegisterInternalCalls.
 void RegisterImGuiInternalCalls();
+// hsmono_imgui.cpp: each script's OnUpdateImGui, in the client's ImGui context (the plugin's OnUpdateImGui).
+void RunScriptsImGui();

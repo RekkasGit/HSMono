@@ -45,6 +45,11 @@
     X(mono_runtime_invoke)               \
     X(mono_gchandle_new)                 \
     X(mono_gchandle_free)                \
+    /* arrays */                         \
+    X(mono_get_int32_class)              \
+    X(mono_get_single_class)             \
+    X(mono_array_new)                    \
+    X(mono_array_addr_with_size)         \
     /* strings */                        \
     X(mono_string_new)                   \
     X(mono_string_to_utf8)               \
