@@ -522,6 +522,36 @@ void mono_Delay(int32_t milliseconds) {
     script->m_delayTime = milliseconds;
 }
 
+// mq_GetBuffData: the player's buff slots, then the song slots, MQ2Mono's 29 bytes each: i32 spell id, caster's spawn
+// id, tics left, hits left, spell type, counter type, counter total, then u8 is-song. get_buff_data_bulk writes that
+// record (HS_BulkBuffData), so its records are copied as they are: RoF2's 42 buff slots, then its 20 song slots.
+// MQ2Mono wrote NUM_LONG_BUFFS records (62 in MQ's eqlib) and then NUM_SONG_BUFFS (30); E3 reads the first 42 as buffs
+// and the next 20 as songs, by position (e3util.MaxBuffSlots, MaxSongSlots), which is where the client puts them.
+// The client's last record, the active discipline's slot (slot type 2), is left out: MQ2Mono's list has no such slot,
+// and a reader that walked to the end would take it for a song.
+// The counter total is the counters left, as MQ2Mono's (the buff's slot data), once the client knows them: from the
+// spell landing on the player, or a server that sends slot data. A buff from the profile or a zone-in list reads the
+// counters the spell starts with until then (get_buff_data_bulk, docs/plugins.md).
+static_assert(sizeof(HS_BulkBuffData) == 29 && HAILSTONE_BUFF_RECORD_SIZE == 29, "mq_GetBuffData's record is MQ2Mono's");
+unsigned char buffData[8192];   // as MQ2Mono's: the scripts read it after the call (each call rewrites it)
+
+unsigned char* mono_GetBuffData(int32_t* bufferLength) {
+    static unsigned char slots[8192];   // 282 records: the client's 63 with room to spare
+    int32_t written = 0;
+    if (MayCallHost() && HAILSTONE_HOST_HAS(host, get_buff_data_bulk)) {
+        const int32_t n = host->get_buff_data_bulk(host->host, slots, static_cast<int32_t>(sizeof slots));
+        for (int32_t at = 0; n > 0 && at + HAILSTONE_BUFF_RECORD_SIZE <= n; at += HAILSTONE_BUFF_RECORD_SIZE) {
+            HS_BulkBuffData record;
+            std::memcpy(&record, slots + at, sizeof record);
+            if (record.slotType == HAILSTONE_BUFF_SLOT_DISC) continue;
+            std::memcpy(buffData + written, slots + at, HAILSTONE_BUFF_RECORD_SIZE);
+            written += HAILSTONE_BUFF_RECORD_SIZE;
+        }
+    }
+    if (bufferLength) *bufferLength = written;   // 0: no profile yet, no 'read', or a thread Hailstone won't answer on
+    return buffData;
+}
+
 } // namespace
 
 // mono_runtime.h. The namespace and classes are fixed by the C# side: MonoCore.Core here, MonoCore.E3ImGUI in
@@ -548,7 +578,7 @@ void RegisterInternalCalls() {
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns3_Buffer", mono_GetSpawns3Buffer);
     // HSMONO_ICALL("MonoCore.Core::mq_GetOnAddSpawnsBuffer", mono_GetOnAddSpawnsBuffer);
 
-    // HSMONO_ICALL("MonoCore.Core::mq_GetBuffData", mono_GetBuffData);
+    HSMONO_ICALL("MonoCore.Core::mq_GetBuffData", mono_GetBuffData);
     // HSMONO_ICALL("MonoCore.Core::mq_GetPetBuffData", mono_GetPetBuffData);
     // HSMONO_ICALL("MonoCore.Core::mq_GetTargetBuffData", mono_GetTargetBuffData);
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns3_Delta", mono_GetSpawns3_Delta);
