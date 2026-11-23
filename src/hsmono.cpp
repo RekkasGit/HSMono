@@ -7,12 +7,13 @@
 #include "hsmono.hpp"
 
 #include <atomic>
+#include <mutex>
 #include <thread>
 
 HAILSTONE_PLUGIN
 
 static uint64_t pulses, chats, zones;
-bool previousCommand = false; //a command was issued on this call.
+std::atomic<bool> previousCommand{false}; //a command was issued on this call.
 int _milisecondsToProcess = 8;
 
 // ---- /mono, as MQ2Mono's: list, version, load|run|start <name>, unload|stop <name|all>, and /mono <name> to load.
@@ -148,8 +149,10 @@ namespace {
 std::thread::id clientThread;
 std::atomic<bool> offThreadCall{false};   // reported in chat at the next pulse (WriteChatf is a host call too)
 
+bool HostAnswersHere() { return std::this_thread::get_id() == clientThread || ClientThreadLent(); }
+
 bool MayCallHost() {
-    if (std::this_thread::get_id() == clientThread || ClientThreadLent()) return true;
+    if (HostAnswersHere()) return true;
     offThreadCall.store(true, std::memory_order_relaxed);
     return false;
 }
@@ -182,6 +185,43 @@ MonoString* mono_ParseTLO(MonoString* text) {
     return NewString(out);
 }
 
+// Lines a script asked to run later (mq_DoCommandDelayed, or mq_DoCommand from a thread Hailstone answers nothing on):
+// run at the start of the next pulse, on the client's thread, in order. Locked: E3 has threads besides its
+// MainProcessor.
+std::mutex delayedCommandsLock;
+std::deque<std::string> delayedCommands;
+
+void QueueCommand(std::string line) {
+    std::lock_guard<std::mutex> lock(delayedCommandsLock);
+    delayedCommands.push_back(std::move(line));
+}
+
+void RunDelayedCommands() {
+    std::deque<std::string> lines;
+    {
+        std::lock_guard<std::mutex> lock(delayedCommandsLock);
+        lines.swap(delayedCommands);
+    }
+    for (const std::string& line : lines) DoCommand(line.c_str());   // a line may queue more: they wait a pulse
+}
+
+// mq_DoCommand: runs the line now, as typed, with this plugin's capabilities (MQ2Mono's HideDoCommand, not delayed).
+// From a thread Hailstone answers nothing on, it waits for the next pulse instead, where MQ2Mono ran it at once.
+// Either way OnPulse gives the other scripts no turn after it this pulse (previousCommand).
+void mono_DoCommand(MonoString* text) {
+    std::string line = Utf8(text);
+    previousCommand = true;
+    if (HostAnswersHere()) DoCommand(line.c_str());
+    else QueueCommand(std::move(line));
+}
+
+// mq_DoCommandDelayed: the line runs at the start of the next pulse (MQ2Mono's HideDoCommand with bDelayed, which MQ
+// runs from its command queue on a later pulse).
+void mono_DoCommandDelayed(MonoString* text) {
+    previousCommand = true;
+    QueueCommand(Utf8(text));
+}
+
 } // namespace
 
 // mono_runtime.h. The namespace and classes are fixed by the C# side: MonoCore.Core here, MonoCore.E3ImGUI in
@@ -190,8 +230,8 @@ MonoString* mono_ParseTLO(MonoString* text) {
 void RegisterInternalCalls() {
     // HSMONO_ICALL("MonoCore.Core::mq_Echo", mono_Echo);
     HSMONO_ICALL("MonoCore.Core::mq_ParseTLO", mono_ParseTLO);
-    // HSMONO_ICALL("MonoCore.Core::mq_DoCommand", mono_DoCommand);
-    // HSMONO_ICALL("MonoCore.Core::mq_DoCommandDelayed", mono_DoCommandDelayed);
+    HSMONO_ICALL("MonoCore.Core::mq_DoCommand", mono_DoCommand);
+    HSMONO_ICALL("MonoCore.Core::mq_DoCommandDelayed", mono_DoCommandDelayed);
     // HSMONO_ICALL("MonoCore.Core::mq_Delay", mono_Delay);
     // HSMONO_ICALL("MonoCore.Core::mq_AddCommand", mono_AddCommand);
     // HSMONO_ICALL("MonoCore.Core::mq_ClearCommands", mono_ClearCommands);
@@ -239,6 +279,10 @@ HAILSTONE_API void ShutdownPlugin(void) {
     // can't start again in the same process, and loading the plugin again joins the running one (InitMono).
     UnloadAllScripts();
     pendingMonoCommands.clear();
+    {
+        std::lock_guard<std::mutex> lock(delayedCommandsLock);
+        delayedCommands.clear();
+    }
     hs::RemoveAllCommands();
     hs::RemoveAllTopLevelObjects();
 }
@@ -254,6 +298,7 @@ HAILSTONE_API void OnPulse(void) {
         }
     }
     RunPendingMonoCommands();
+    RunDelayedCommands();
     previousCommand = false;
     if (appDomainProcessQueue.empty()) return;
 

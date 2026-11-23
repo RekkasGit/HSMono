@@ -11,6 +11,7 @@
 #include <string.h>
 #include <algorithm>    // std::equal in ci_equals
 #include <array>        // std::array in m_IMGUI_InputColorValues
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -85,7 +86,7 @@ extern std::map<std::string, monoAppDomainInfo> monoAppDomains;
 extern std::map<MonoDomain*, std::string> monoAppDomainPtrToString;
 extern std::deque<std::string> appDomainProcessQueue; // a revolving list of who is valid to process
 // hsmono.cpp
-extern bool previousCommand; // a command was issued on this pulse
+extern std::atomic<bool> previousCommand; // a command was issued on this pulse (set from a script's thread too)
 
 // ---- app_domains.cpp
 
