@@ -222,6 +222,27 @@ void mono_DoCommandDelayed(MonoString* text) {
     QueueCommand(Utf8(text));
 }
 
+// mq_AddCommand, mq_RemoveCommand, mq_ClearCommands: the calling script's own commands (its domain's,
+// monoAppDomainInfo's AddScriptCommand / RemoveCommand / ClearCommands in app_domains.cpp). A command runs the script's
+// OnCommand with the whole line, and goes when the script unloads. From the root domain they do nothing (MQ2Mono
+// would make an empty script entry there), and from a thread Hailstone answers nothing on they do nothing either.
+
+bool mono_AddCommand(MonoString* text) {
+    monoAppDomainInfo* script = CurrentScript();
+    if (!script || !MayCallHost()) return false;
+    return script->AddScriptCommand(Utf8(text));   // false when the name is taken (MQ2Mono's AddCommand)
+}
+
+void mono_RemoveCommand(MonoString* text) {
+    monoAppDomainInfo* script = CurrentScript();
+    if (script && MayCallHost()) script->RemoveCommand(Utf8(text));
+}
+
+void mono_ClearCommands() {
+    monoAppDomainInfo* script = CurrentScript();
+    if (script && MayCallHost()) script->ClearCommands();
+}
+
 } // namespace
 
 // mono_runtime.h. The namespace and classes are fixed by the C# side: MonoCore.Core here, MonoCore.E3ImGUI in
@@ -233,9 +254,9 @@ void RegisterInternalCalls() {
     HSMONO_ICALL("MonoCore.Core::mq_DoCommand", mono_DoCommand);
     HSMONO_ICALL("MonoCore.Core::mq_DoCommandDelayed", mono_DoCommandDelayed);
     // HSMONO_ICALL("MonoCore.Core::mq_Delay", mono_Delay);
-    // HSMONO_ICALL("MonoCore.Core::mq_AddCommand", mono_AddCommand);
-    // HSMONO_ICALL("MonoCore.Core::mq_ClearCommands", mono_ClearCommands);
-    // HSMONO_ICALL("MonoCore.Core::mq_RemoveCommand", mono_RemoveCommand);
+    HSMONO_ICALL("MonoCore.Core::mq_AddCommand", mono_AddCommand);
+    HSMONO_ICALL("MonoCore.Core::mq_ClearCommands", mono_ClearCommands);
+    HSMONO_ICALL("MonoCore.Core::mq_RemoveCommand", mono_RemoveCommand);
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpellDataEffectCount", mono_GetSpellDataEffectCount);
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpellDataEffect", mono_GetSpellDataEffect);
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns", mono_GetSpawns);
