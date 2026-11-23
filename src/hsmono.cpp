@@ -637,6 +637,206 @@ unsigned char* mono_GetTargetBuffData(int32_t /*spawnId*/, int32_t* bufferLength
     return targetBuffData;
 }
 
+// mq_GetSpawns3_Delta: what changes about each spawn in the zone, MQ2Mono's 60 bytes a spawn, as E3's
+// Spawns.RefreshList reads it: i32 id, u8 aggressive, u8 dead, f32 heading, f32 height, i32 master, u8 moving,
+// i64 HP percent, i32 pet id, u8 targetable, i32 target of target, f32 x, y, z, then the player's x, y, z (the same
+// in every record). E3 takes an empty list, or an id it does not know, as the cue to read every spawn again
+// (mq_GetSpawns3).
+// From get_spawns_data_bulk's records: the flags, heading, height, master, HP percent and position as they are. The pet
+// id and target of target are 0: MQ2Mono's came from MacroQuest's player object (which extends the spawn), and do
+// not apply to the spawn list.
+static_assert(sizeof(HS_BulkSpawnHeader) == HS_BULK_SPAWN_HEADER_SIZE && HS_BULK_SPAWN_HEADER_SIZE == 16, "the spawn header");
+static_assert(sizeof(HS_BulkSpawnFixedRecord) == HS_BULK_SPAWN_RECORD_SIZE && HS_BULK_SPAWN_RECORD_SIZE == 92,
+    "the spawn record");
+constexpr size_t kSpawnDeltaRecord = 60;   // MQ2Mono's
+unsigned char spawnsDelta[300000];   // 5000 spawns; the scripts read it after the call (each call rewrites it)
+
+unsigned char* mono_GetSpawns3_Delta(int32_t* bufferLength) {
+    size_t written = 0;
+    // get_spawns_data_bulk's records (92 bytes and seven strings each) go into the host's bulk buffer (2 MiB), held
+    // only while they are rewritten into the delta.
+    int32_t bulkSize = 0;
+    unsigned char* spawnsBulk = nullptr;
+    if (MayCallHost() && HAILSTONE_HOST_HAS(host, get_spawns_data_bulk) && HAILSTONE_HOST_HAS(host, acquire_bulk_buffer))
+        spawnsBulk = host->acquire_bulk_buffer(host->host, &bulkSize);
+    if (spawnsBulk) {
+        const int32_t filled = host->get_spawns_data_bulk(host->host, spawnsBulk, bulkSize);
+        HS_BulkSpawnHeader header{};
+        if (filled >= HS_BULK_SPAWN_HEADER_SIZE) std::memcpy(&header, spawnsBulk, sizeof header);
+        auto put = [&](const auto& v) { std::memcpy(spawnsDelta + written, &v, sizeof v); written += sizeof v; };
+        size_t at = HS_BULK_SPAWN_HEADER_SIZE;
+        for (uint32_t i = 0; filled > 0 && i < header.spawnCount; ++i) {
+            if (at + HS_BULK_SPAWN_RECORD_SIZE > static_cast<size_t>(filled)) break;
+            if (written + kSpawnDeltaRecord > sizeof spawnsDelta) break;
+            HS_BulkSpawnFixedRecord r;
+            std::memcpy(&r, spawnsBulk + at, sizeof r);
+            at += HS_BULK_SPAWN_RECORD_SIZE;
+            for (int s = 0; s < 7; ++s) {   // its seven strings, stepped over to the next record
+                uint16_t len = 0;
+                if (at + sizeof len > static_cast<size_t>(filled)) break;
+                std::memcpy(&len, spawnsBulk + at, sizeof len);
+                at += sizeof len + len;
+            }
+            put(r.id);
+            put(static_cast<uint8_t>((r.flags & HS_BULK_SPAWN_AGGRESSIVE) != 0));
+            put(static_cast<uint8_t>((r.flags & HS_BULK_SPAWN_DEAD) != 0));
+            put(r.heading);
+            put(r.height);
+            put(r.master);
+            put(static_cast<uint8_t>((r.flags & HS_BULK_SPAWN_MOVING) != 0));
+            put(static_cast<int64_t>(r.pctHPs));
+            put(int32_t{0});   // pet id
+            put(static_cast<uint8_t>((r.flags & HS_BULK_SPAWN_TARGETABLE) != 0));
+            put(int32_t{0});   // target of target
+            put(r.x);
+            put(r.y);
+            put(r.z);
+            put(header.playerX);
+            put(header.playerY);
+            put(header.playerZ);
+        }
+        host->release_bulk_buffer(host->host);
+    }
+    if (bufferLength) *bufferLength = static_cast<int32_t>(written);   // 0: no spawns, no 'read', or a thread Hailstone won't answer on
+    return spawnsDelta;
+}
+
+// mq_GetSpawns3: every spawn in the zone, one at a time. Each spawn is written to spawns3Buffer, then the calling
+// script's OnSetSpawnsViaCallback runs and copies it out with mq_GetSpawns3_Buffer, then the next spawn is written, as
+// MQ2Mono did. E3 calls it from Spawns.RefreshList, after emptying its spawn list, and adds each spawn as its callback
+// gets it.
+// The record is MQ2Mono's, as E3's Spawn.Init reads it, field by field in this order (strings as an i32 length, then
+// that many bytes, no NUL):
+//   i32 id, u8 afk, u8 aggressive, u8 anonymous, i32 blind, i32 body type, str body type, u8 buyer, i32 class,
+//   str clean name, i32 con colour, i32 endurance, i64 HP, i32 mana, u8 dead, str display name, u8 ducking,
+//   u8 feigning, i32 gender, u8 GM, i64 guild, f32 heading, f32 height, u8 invis, u8 summoned, i32 level, u8 levitating,
+//   u8 linkdead, f32 look, i32 master, i32 max endurance, f32 max range, f32 max range to, u8 mount, u8 moving,
+//   str name, u8 named, i64 HP percent, i32 mana percent, i32 pet id, i32 player state, i32 race, str race name,
+//   u8 role playing, u8 sitting, u8 sneaking, u8 standing, u8 stunned, str suffix, u8 targetable,
+//   i32 target of target, u8 trader, str type, u8 underwater, f32 x, y, z, f32 the player's x, y, z, i32 deity.
+// From get_spawns_data_bulk's records (the flags, numbers and its seven strings, in the same order). Not in them, and 0:
+// blind, endurance, mana, look, max endurance, mana percent; the pet id and target of target are MacroQuest's player
+// object's, not a spawn's. The HP is the bulk record's (the client knows a spawn's HP as a percent).
+// The bulk read goes into the host's bulk buffer, held until the last spawn's callback returns: a script's own call
+// that takes the bulk buffer (mq_GetSpawns3_Delta) from inside the callback would overwrite the list. A callback
+// that throws ends the list (the exception is reported once, as any call's).
+// A string is cut to 512 bytes, so a record always fits the 4096-byte buffer: names come from the server uncapped.
+unsigned char spawns3Buffer[4096];
+int32_t spawns3Length = 0;
+
+unsigned char* mono_GetSpawns3Buffer(int32_t* bufferLength) {
+    if (bufferLength) *bufferLength = spawns3Length;
+    return spawns3Buffer;
+}
+
+void mono_GetSpawns3() {
+    monoAppDomainInfo* script = CurrentScript();
+    if (!script || !script->m_OnSetSpawnsViaCallback) return;
+    if (!MayCallHost() || !HAILSTONE_HOST_HAS(host, get_spawns_data_bulk) || !HAILSTONE_HOST_HAS(host, acquire_bulk_buffer))
+        return;
+    int32_t bulkSize = 0;
+    unsigned char* bulk = host->acquire_bulk_buffer(host->host, &bulkSize);
+    if (!bulk) return;
+    const int32_t filled = host->get_spawns_data_bulk(host->host, bulk, bulkSize);
+    HS_BulkSpawnHeader header{};
+    if (filled >= HS_BULK_SPAWN_HEADER_SIZE) std::memcpy(&header, bulk, sizeof header);
+    size_t at = HS_BULK_SPAWN_HEADER_SIZE;
+    for (uint32_t i = 0; filled > 0 && i < header.spawnCount; ++i) {
+        if (at + HS_BULK_SPAWN_RECORD_SIZE > static_cast<size_t>(filled)) break;
+        HS_BulkSpawnFixedRecord r;
+        std::memcpy(&r, bulk + at, sizeof r);
+        at += HS_BULK_SPAWN_RECORD_SIZE;
+        // BodyDesc, CleanName, DisplayName, Name, RaceName, Suffix, TypeDesc
+        std::string_view text[7];
+        bool whole = true;
+        for (auto& t : text) {
+            uint16_t len = 0;
+            if (at + sizeof len > static_cast<size_t>(filled)) { whole = false; break; }
+            std::memcpy(&len, bulk + at, sizeof len);
+            at += sizeof len;
+            if (at + len > static_cast<size_t>(filled)) { whole = false; break; }
+            t = std::string_view(reinterpret_cast<const char*>(bulk + at), len);
+            at += len;
+        }
+        if (!whole) break;
+
+        size_t n = 0;
+        auto put = [&](const auto& v) { std::memcpy(spawns3Buffer + n, &v, sizeof v); n += sizeof v; };
+        auto flag = [&](uint32_t f) { put(static_cast<uint8_t>((r.flags & f) != 0)); };
+        auto str = [&](std::string_view t) {
+            const int32_t len = static_cast<int32_t>(std::min<size_t>(t.size(), 512));
+            put(len);
+            std::memcpy(spawns3Buffer + n, t.data(), static_cast<size_t>(len));
+            n += static_cast<size_t>(len);
+        };
+        put(r.id);
+        flag(HS_BULK_SPAWN_AFK);
+        flag(HS_BULK_SPAWN_AGGRESSIVE);
+        flag(HS_BULK_SPAWN_ANON);
+        put(int32_t{0});           // blind
+        put(r.bodyTypeID);
+        str(text[0]);              // body type
+        flag(HS_BULK_SPAWN_BUYER);
+        put(r.classID);
+        str(text[1]);              // clean name
+        put(r.conColorID);
+        put(int32_t{0});           // endurance
+        put(r.currentHps);
+        put(int32_t{0});           // mana
+        flag(HS_BULK_SPAWN_DEAD);
+        str(text[2]);              // display name
+        flag(HS_BULK_SPAWN_DUCKING);
+        flag(HS_BULK_SPAWN_FEIGNING);
+        put(r.genderId);
+        flag(HS_BULK_SPAWN_GM);
+        put(r.guildID);
+        put(r.heading);
+        put(r.height);
+        flag(HS_BULK_SPAWN_INVIS);
+        flag(HS_BULK_SPAWN_SUMMONED);
+        put(r.level);
+        flag(HS_BULK_SPAWN_LEVITATION);
+        flag(HS_BULK_SPAWN_LINKDEAD);
+        put(0.0f);                 // look
+        put(r.master);
+        put(int32_t{0});           // max endurance
+        put(r.maxRange);
+        put(r.maxRangeTo);
+        flag(HS_BULK_SPAWN_MOUNT);
+        flag(HS_BULK_SPAWN_MOVING);
+        str(text[3]);              // name
+        flag(HS_BULK_SPAWN_NAMED);
+        put(static_cast<int64_t>(r.pctHPs));
+        put(int32_t{0});           // mana percent
+        put(int32_t{0});           // pet id
+        put(r.playerState);
+        put(r.raceID);
+        str(text[4]);              // race name
+        flag(HS_BULK_SPAWN_ROLEPLAYING);
+        flag(HS_BULK_SPAWN_SITTING);
+        flag(HS_BULK_SPAWN_SNEAKING);
+        flag(HS_BULK_SPAWN_STANDING);
+        flag(HS_BULK_SPAWN_STUNNED);
+        str(text[5]);              // suffix
+        flag(HS_BULK_SPAWN_TARGETABLE);
+        put(int32_t{0});           // target of target
+        flag(HS_BULK_SPAWN_TRADER);
+        str(text[6]);              // type
+        flag(HS_BULK_SPAWN_UNDERWATER);
+        put(r.x);
+        put(r.y);
+        put(r.z);
+        put(header.playerX);
+        put(header.playerY);
+        put(header.playerZ);
+        put(r.deity);
+        spawns3Length = static_cast<int32_t>(n);
+        if (!Invoke(*script, script->m_OnSetSpawnsViaCallback, "OnSetSpawnsViaCallback")) break;
+    }
+    spawns3Length = 0;
+    host->release_bulk_buffer(host->host);
+}
+
 } // namespace
 
 // mono_runtime.h. The namespace and classes are fixed by the C# side: MonoCore.Core here, MonoCore.E3ImGUI in
@@ -659,14 +859,14 @@ void RegisterInternalCalls() {
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns", mono_GetSpawns);
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns2", mono_GetSpawns2);
 
-    // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns3", mono_GetSpawns3);
-    // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns3_Buffer", mono_GetSpawns3Buffer);
+    HSMONO_ICALL("MonoCore.Core::mq_GetSpawns3", mono_GetSpawns3);
+    HSMONO_ICALL("MonoCore.Core::mq_GetSpawns3_Buffer", mono_GetSpawns3Buffer);
     // HSMONO_ICALL("MonoCore.Core::mq_GetOnAddSpawnsBuffer", mono_GetOnAddSpawnsBuffer);
 
     HSMONO_ICALL("MonoCore.Core::mq_GetBuffData", mono_GetBuffData);
     HSMONO_ICALL("MonoCore.Core::mq_GetPetBuffData", mono_GetPetBuffData);
     HSMONO_ICALL("MonoCore.Core::mq_GetTargetBuffData", mono_GetTargetBuffData);
-    // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns3_Delta", mono_GetSpawns3_Delta);
+    HSMONO_ICALL("MonoCore.Core::mq_GetSpawns3_Delta", mono_GetSpawns3_Delta);
     HSMONO_ICALL("MonoCore.Core::mq_GetXtargetInfo", mono_GetXtargetInfo);
     HSMONO_ICALL("MonoCore.Core::mq_GetAvailableAAIds", mono_GetAvailableAAIds);
     HSMONO_ICALL("MonoCore.Core::mq_GetAvilableDiscIds", mono_GetAvilableDiscIds);
