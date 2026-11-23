@@ -192,8 +192,8 @@ MonoString* mono_ParseTLO(MonoString* text) {
     return NewString(out);
 }
 
-// Lines a script asked to run later (mq_DoCommandDelayed, or mq_DoCommand from a thread Hailstone answers nothing on):
-// run at the start of the next pulse, on the client's thread, in order. Locked: E3 has threads besides its
+// Lines a script asked to run later (mq_DoCommandDelayed, or mq_DoCommand and mq_Echo from a thread Hailstone answers
+// nothing on): run at the start of the next pulse, on the client's thread, in order. Locked: E3 has threads besides its
 // MainProcessor.
 std::mutex delayedCommandsLock;
 std::deque<std::string> delayedCommands;
@@ -210,6 +210,16 @@ void RunDelayedCommands() {
         lines.swap(delayedCommands);
     }
     for (const std::string& line : lines) DoCommand(line.c_str());   // a line may queue more: they wait a pulse
+}
+
+// mq_Echo: a line in the chat window, as MQ2Mono's WriteChatf, written whole (without WriteChatf's 2 KiB cut).
+// MacroQuest's colour codes in it ("\ag", "\a-w", "\a#336699", "\ax": E3 colours most of its lines) are the client's
+// to draw (docs/plugins.md "Colour codes"). From a thread Hailstone answers nothing on it is queued as an /echo of the
+// line for the next pulse, in order with the delayed commands.
+void mono_Echo(MonoString* text) {
+    std::string line = Utf8(text);
+    if (HostAnswersHere()) host->write_chat(host->host, line.c_str(), 0);
+    else QueueCommand("/echo " + line);
 }
 
 // mq_DoCommand: runs the line now, as typed, with this plugin's capabilities (MQ2Mono's HideDoCommand, not delayed).
@@ -862,7 +872,7 @@ void mono_GetSpawns3() {
 // hsmono_imgui.cpp. Each line stays commented out until its mono_* function is in this file (above this point, or
 // declared there).
 void RegisterInternalCalls() {
-    // HSMONO_ICALL("MonoCore.Core::mq_Echo", mono_Echo);
+    HSMONO_ICALL("MonoCore.Core::mq_Echo", mono_Echo);
     HSMONO_ICALL("MonoCore.Core::mq_ParseTLO", mono_ParseTLO);
     HSMONO_ICALL("MonoCore.Core::mq_DoCommand", mono_DoCommand);
     HSMONO_ICALL("MonoCore.Core::mq_DoCommandDelayed", mono_DoCommandDelayed);

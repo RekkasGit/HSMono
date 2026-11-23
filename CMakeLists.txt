@@ -36,8 +36,8 @@ target_include_directories(HSMono PRIVATE "${CMAKE_SOURCE_DIR}/sdk")
 target_include_directories(HSMono SYSTEM PRIVATE mono/include/mono-2.0)
 
 
-set_target_properties(HSMono PROPERTIES PREFIX "" LIBRARY_OUTPUT_DIRECTORY ${HAILSTONE_TREE_DIR}/plugins$<0:>
-                                            RUNTIME_OUTPUT_DIRECTORY ${HAILSTONE_TREE_DIR}/plugins$<0:>)
+set_target_properties(HSMono PROPERTIES PREFIX "" LIBRARY_OUTPUT_DIRECTORY ${HAILSTONE_TREE_DIR}/plugins/hsmono$<0:>
+                                            RUNTIME_OUTPUT_DIRECTORY ${HAILSTONE_TREE_DIR}/plugins/hsmono/$<0:>)
 
 install(TARGETS HSMono LIBRARY DESTINATION plugins COMPONENT examples EXCLUDE_FROM_ALL) # a MODULE is a LIBRARY
 
