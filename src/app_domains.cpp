@@ -2,6 +2,7 @@
 // Follows MQ2Mono's InitAppDomain, UnloadAppDomain and UnloadAllAppDomains.
 #include "hsmono.hpp"
 
+#include <atomic>
 #include <filesystem>
 #include <system_error>
 #include <thread>
@@ -21,6 +22,9 @@ constexpr const char* kCoreClass = "Core";
 constexpr const char* kDomainConfig = "e3.config";
 
 int invokeDepth = 0;   // calls into C# in progress (Invoke nests when a script's command runs inside another's call)
+// The client's thread is lent to the scripts' own threads (hs::LendThread around the outermost Invoke). Read from
+// those threads.
+std::atomic<bool> clientThreadLent{false};
 
 bool IsFile(const fs::path& p) {
     std::error_code ec;   // nothing may throw out of a command
@@ -82,6 +86,14 @@ void Unload(std::map<std::string, monoAppDomainInfo>::iterator it) {
 
 std::optional<MonoObject*> Invoke(monoAppDomainInfo& script, MonoMethod* method, const char* what, void** params) {
     if (!method || !script.m_appDomain) return std::optional<MonoObject*>(nullptr);   // nothing to call: not a throw
+    // The outermost call lends the client's thread to the scripts' threads while it waits: E3's MainProcessor runs on
+    // a thread of its own, while OnPulse blocks, and reads TLOs and runs commands from there (mq_ParseTLO ...). A
+    // nested call (a script's command inside another's call, a TLO a lent thread reads) is inside that lending.
+    std::optional<hs::LendThread> lend;
+    if (invokeDepth == 0) {
+        lend.emplace();
+        clientThreadLent.store(lend->ok());
+    }
     MonoDomain* previous = mono.mono_domain_get();
     MonoObject* exception = nullptr;
     ++invokeDepth;
@@ -89,6 +101,7 @@ std::optional<MonoObject*> Invoke(monoAppDomainInfo& script, MonoMethod* method,
     MonoObject* result = mono.mono_runtime_invoke(method, script.m_classInstance, params, &exception);
     mono.mono_domain_set(previous ? previous : g_rootDomain, false);
     --invokeDepth;
+    if (lend) clientThreadLent.store(false);   // before ~LendThread ends it (which waits for a host call in flight)
     if (!exception) return result;
     if (!script.m_exceptionReported) {
         script.m_exceptionReported = true;
@@ -106,6 +119,8 @@ monoAppDomainInfo* CurrentScript() {
 }
 
 bool InScriptCall() { return invokeDepth > 0; }
+
+bool ClientThreadLent() { return clientThreadLent.load(); }
 
 std::optional<std::string> ScriptName(std::string_view typed) {
     if (typed.size() > 4 && ci_equals(typed.substr(typed.size() - 4), ".dll")) typed.remove_suffix(4);
@@ -196,6 +211,20 @@ bool UnloadScript(std::string_view name) {
 
 void UnloadAllScripts() {
     while (!monoAppDomains.empty()) Unload(monoAppDomains.begin());
+}
+
+std::string QueryScript(std::string_view name, const std::string& expression) {
+    auto it = FindScript(name);
+    if (it == monoAppDomains.end() || !it->second.m_OnQuery) return {};
+    monoAppDomainInfo& d = it->second;
+    MonoString* monoExpression = mono.mono_string_new(d.m_appDomain, expression.c_str());
+    void* params[1] = {monoExpression};
+    const std::optional<MonoObject*> result = Invoke(d, d.m_OnQuery, "OnQuery", params);
+    if (!result || !*result) return {};
+    char* utf8 = mono.mono_string_to_utf8(reinterpret_cast<MonoString*>(*result));   // OnQuery returns a string
+    std::string answer = utf8 ? utf8 : "";
+    if (utf8) mono.mono_free(utf8);
+    return answer;
 }
 
 // ---- a script's commands

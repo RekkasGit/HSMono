@@ -101,6 +101,10 @@ monoAppDomainInfo* CurrentScript();
 // True while C# code is running: a script can't be loaded or unloaded then, since its domain may be the one running.
 bool InScriptCall();
 
+// True while the client's thread is lent to the scripts' own threads (lend_thread, around the outermost Invoke): a
+// script's thread may call the host then. False on a client without lend_thread.
+bool ClientThreadLent();
+
 // A name the player typed, as a script name (letters, digits, '_', '-', '.'; a trailing ".dll" dropped), or empty.
 std::optional<std::string> ScriptName(std::string_view typed);
 
@@ -111,6 +115,10 @@ std::optional<std::string> LoadScript(const std::string& name);
 // /mono unload: OnStop, its commands, its domain (UnloadAppDomain). False when no such script runs.
 bool UnloadScript(std::string_view name);
 void UnloadAllScripts();
+
+// ${HSMono.Query[name,expression]}: the named script's OnQuery(expression) (any case of the name, as /mono). Empty
+// when no such script runs, it has no OnQuery, it threw (reported once, as any call) or it returned null.
+std::string QueryScript(std::string_view name, const std::string& expression);
 
 // ---- internal calls
 

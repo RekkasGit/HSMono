@@ -6,6 +6,9 @@
 
 #include "hsmono.hpp"
 
+#include <atomic>
+#include <thread>
+
 HAILSTONE_PLUGIN
 
 static uint64_t pulses, chats, zones;
@@ -101,6 +104,31 @@ void MonoCommand(const char* args) {
     WriteChatf("[HSMono] Finished Loading %s", name->c_str());
 }
 
+// ---- the HSMono TLO, MQ2Mono's ${MQ2Mono} under this plugin's name:
+//   ${HSMono}                           TRUE
+//   ${HSMono.Query[e3,E3Bots(Necro01).Query(ShowClass)]}
+//                                       the text after the first comma, trimmed, goes to the e3 script's OnQuery, and
+//                                       its string comes back; empty with no comma, no such script or no answer.
+// [] can't appear inside the brackets (they end the index), so a query uses () as above.
+// Unlike MQ2Mono: the script's name matches in any case (as /mono's does), and an exception in OnQuery is caught.
+
+std::string queryAnswer;   // the client copies a TLO's string when the TLO returns
+
+bool HSMonoTlo(const char*, const char* member, const char* member_index, HailstoneValue& out) {
+    if (!member) {
+        out = hs::Bool(true);
+        return true;
+    }
+    if (!ci_equals(member, "Query")) return false;
+    std::string answer;
+    const std::string_view arg = member_index ? member_index : "";
+    if (const size_t comma = arg.find(','); comma != std::string_view::npos)
+        answer = QueryScript(Trim(arg.substr(0, comma)), std::string(Trim(arg.substr(comma + 1))));
+    queryAnswer = std::move(answer);   // after the call: OnQuery may itself have read ${HSMono.Query[...]}
+    out = hs::String(queryAnswer.c_str());
+    return true;
+}
+
 void RunPendingMonoCommands() {
     while (!pendingMonoCommands.empty()) {
         const std::string line = std::move(pendingMonoCommands.front());
@@ -111,12 +139,57 @@ void RunPendingMonoCommands() {
 
 } // namespace
 
+// ---- the MonoCore.Core internal calls (MQ2Mono.cpp's mono_*)
+
+namespace {
+
+// The client's thread. Hailstone answers host calls on it, and on a script's own thread while Invoke lends it the
+// client's (E3's MainProcessor runs on one while the client's thread waits in OnPulse; docs/plugins.md "Threads").
+std::thread::id clientThread;
+std::atomic<bool> offThreadCall{false};   // reported in chat at the next pulse (WriteChatf is a host call too)
+
+bool MayCallHost() {
+    if (std::this_thread::get_id() == clientThread || ClientThreadLent()) return true;
+    offThreadCall.store(true, std::memory_order_relaxed);
+    return false;
+}
+
+std::string Utf8(MonoString* s) {
+    if (!s) return {};
+    char* c = mono.mono_string_to_utf8(s);
+    std::string out = c ? c : "";
+    if (c) mono.mono_free(c);
+    return out;
+}
+
+// A string for the C# side, in the calling script's domain (MQ2Mono's mono_string_new_wrapper).
+MonoString* NewString(const char* s) {
+    MonoDomain* d = mono.mono_domain_get();
+    return mono.mono_string_new(d ? d : g_rootDomain, s ? s : "");
+}
+
+// mq_ParseTLO: `text` with each ${...} replaced (ParseMacroData). "NULL" where MQ2Mono's ParseMacroData failed: here
+// without the 'read' capability, and from a thread Hailstone answers nothing on (MayCallHost).
+// MQ2Mono parsed into MAX_STRING (2048) bytes; this takes up to 16 KiB and cuts a longer answer there, since parsing
+// again with more room would run each TLO twice. Hailstone has one parser, so MQ2Mono's gParserVersion 2 has no
+// counterpart.
+MonoString* mono_ParseTLO(MonoString* text) {
+    if (!MayCallHost()) return NewString("NULL");
+    const std::string in = Utf8(text);
+    char out[16384];
+    out[0] = '\0';
+    if (ParseMacroData(in.c_str(), out, sizeof out) < 0) return NewString("NULL");
+    return NewString(out);
+}
+
+} // namespace
+
 // mono_runtime.h. The namespace and classes are fixed by the C# side: MonoCore.Core here, MonoCore.E3ImGUI in
 // hsmono_imgui.cpp. Each line stays commented out until its mono_* function is in this file (above this point, or
 // declared there).
 void RegisterInternalCalls() {
     // HSMONO_ICALL("MonoCore.Core::mq_Echo", mono_Echo);
-    // HSMONO_ICALL("MonoCore.Core::mq_ParseTLO", mono_ParseTLO);
+    HSMONO_ICALL("MonoCore.Core::mq_ParseTLO", mono_ParseTLO);
     // HSMONO_ICALL("MonoCore.Core::mq_DoCommand", mono_DoCommand);
     // HSMONO_ICALL("MonoCore.Core::mq_DoCommandDelayed", mono_DoCommandDelayed);
     // HSMONO_ICALL("MonoCore.Core::mq_Delay", mono_Delay);
@@ -155,7 +228,9 @@ void RegisterInternalCalls() {
 }
 
 HAILSTONE_API void InitializePlugin(void) {
+    clientThread = std::this_thread::get_id();   // the client calls every hook on its thread
     if (!hs::AddCommand("/mono", MonoCommand)) WriteChatf("[HSMono] /mono could not be added");
+    if (!hs::AddTopLevelObject("HSMono", HSMonoTlo)) WriteChatf("[HSMono] the HSMono TLO could not be added");
     WriteChatf("[HSMono] loaded");
 }
 
@@ -165,10 +240,19 @@ HAILSTONE_API void ShutdownPlugin(void) {
     UnloadAllScripts();
     pendingMonoCommands.clear();
     hs::RemoveAllCommands();
+    hs::RemoveAllTopLevelObjects();
 }
 
 HAILSTONE_API void OnPulse(void) {
     if (!g_rootDomain) return;   // Mono isn't running: no /mono yet
+    if (offThreadCall.exchange(false, std::memory_order_relaxed)) {
+        static bool told = false;   // once: E3 asks from its thread all the time
+        if (!told) {
+            told = true;
+            WriteChatf("[HSMono] a script called Hailstone from a thread of its own while no script call was running, "
+                       "or on a client without lend_thread; those calls got nothing (NULL)");
+        }
+    }
     RunPendingMonoCommands();
     previousCommand = false;
     if (appDomainProcessQueue.empty()) return;
