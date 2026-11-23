@@ -1,14 +1,21 @@
-// Every OS call hsmono makes: loading the Mono runtime and finding an installed one.
+// Every OS call hsmono makes: loading the Mono runtime, finding an installed one, and the process's memory.
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
 #if defined(_WIN32)
 #define NOMINMAX
 #include <windows.h>
+#include <psapi.h>
 #else
 #include <dlfcn.h>
+#endif
+#if defined(__APPLE__)
+#include <mach/mach.h>
 #endif
 
 using AnyFn = void (*)();
@@ -46,6 +53,32 @@ AnyFn FindSymbol(void* library, const char* name) {
     static_assert(sizeof fn == sizeof p);
     std::memcpy(&fn, &p, sizeof fn);   // object pointer to function pointer without a conditionally-supported cast
     return fn;
+#endif
+}
+
+// The process's private memory in bytes, 0 when the OS won't say: what Windows calls its page file usage (the private
+// bytes committed, PROCESS_MEMORY_COUNTERS::PagefileUsage). Linux and macOS have no commit charge, so the nearest:
+// Linux the private (anonymous) memory in RAM and swapped out (/proc/self/status RssAnon + VmSwap), macOS the physical
+// footprint (TASK_VM_INFO phys_footprint, Activity Monitor's "Memory").
+std::uint64_t PrivateMemoryBytes() {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS counters{};
+    counters.cb = sizeof counters;
+    if (!K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof counters)) return 0;
+    return counters.PagefileUsage;
+#elif defined(__APPLE__)
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS) return 0;
+    return info.phys_footprint;
+#else
+    std::ifstream status("/proc/self/status");
+    std::uint64_t kib = 0;
+    for (std::string line; std::getline(status, line);) {
+        if (line.rfind("RssAnon:", 0) == 0 || line.rfind("VmSwap:", 0) == 0)
+            kib += std::strtoull(line.c_str() + line.find(':') + 1, nullptr, 10);   // "RssAnon:   12345 kB"
+    }
+    return kib * 1024;
 #endif
 }
 

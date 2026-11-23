@@ -746,6 +746,19 @@ static bool BeginScriptsImGui() {
     return ImGui::GetCurrentContext()->WithinFrameScope;
 }
 
+std::string FocusedWindowName() {
+    void* context = host && host->imgui_context ? host->imgui_context(host->host) : nullptr;
+    if (!context) return {};
+    const ImGuiWindow* window = static_cast<ImGuiContext*>(context)->NavWindow;
+    if (!window || !window->Name) return {};
+    // A title's "##id" (or "###id") part is Dear ImGui's, not the window's name; a window named by its id alone
+    // ("##castbar") keeps it.
+    std::string_view name(window->Name);
+    const size_t id = name.find("##");
+    if (id != 0 && id != std::string_view::npos) name = name.substr(0, id);
+    return std::string(name);
+}
+
 void RunScriptsImGui() {
     if (!g_rootDomain || monoAppDomains.empty() || !BeginScriptsImGui()) return;
     for (auto& [name, script] : monoAppDomains) {

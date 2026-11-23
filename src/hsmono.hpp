@@ -134,3 +134,6 @@ std::string QueryScript(std::string_view name, const std::string& expression);
 void RegisterImGuiInternalCalls();
 // hsmono_imgui.cpp: each script's OnUpdateImGui, in the client's ImGui context (the plugin's OnUpdateImGui).
 void RunScriptsImGui();
+// hsmono_imgui.cpp: the name of the window that has the keyboard focus (Dear ImGui's NavWindow) without its "##" id,
+// for mq_GetFocusedWindowName; empty when none has it or the client gives no ImGui context.
+std::string FocusedWindowName();

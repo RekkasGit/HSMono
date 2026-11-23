@@ -146,6 +146,9 @@ void RunPendingMonoCommands() {
 
 // ---- the MonoCore.Core internal calls (MQ2Mono.cpp's mono_*)
 
+// mono_loader.cpp: the OS calls.
+std::uint64_t PrivateMemoryBytes();
+
 namespace {
 
 // The client's thread. Hailstone answers host calls on it, and on a script's own thread while Invoke lends it the
@@ -724,6 +727,22 @@ unsigned char* mono_GetSpawns3_Delta(int32_t* bufferLength) {
 unsigned char spawns3Buffer[4096];
 int32_t spawns3Length = 0;
 
+// mq_Memory_GetPageFileSize: the process's private memory in MB (E3 publishes it as ${Me.Memory_EQPageFile}). On
+// Windows the page file usage, as MQ2Mono's name says; on Linux and macOS the nearest they have (PrivateMemoryBytes).
+// The whole client's: the game, Hailstone, Mono and every script. 0 when the OS won't say.
+double mono_Memory_GetPageFileSize() {
+    return static_cast<double>(PrivateMemoryBytes()) / (1024.0 * 1024.0);
+}
+
+// mq_GetFocusedWindowName: the window that has the keyboard focus, "NULL" when none does (the game world has it).
+// Hailstone's windows are Dear ImGui's: a UI pack's are named as the pack names them (its EQ window names), the
+// client's own by their titles. E3 publishes it as ${EQ.CurrentFocusedWindowName} and E3UI shows it.
+MonoString* mono_GetFocusedWindowName() {
+    if (!MayCallHost()) return NewString("NULL");
+    const std::string name = FocusedWindowName();
+    return NewString(name.empty() ? "NULL" : name.c_str());
+}
+
 unsigned char* mono_GetSpawns3Buffer(int32_t* bufferLength) {
     if (bufferLength) *bufferLength = spawns3Length;
     return spawns3Buffer;
@@ -873,7 +892,7 @@ void RegisterInternalCalls() {
     HSMONO_ICALL("MonoCore.Core::mq_GetSpellIds", mono_GetSpellIds);
 
     // HSMONO_ICALL("MonoCore.Core::mq_GetRunNextCommand", mono_GetRunNextCommand);
-    // HSMONO_ICALL("MonoCore.Core::mq_GetFocusedWindowName", mono_GetFocusedWindowName);
+    HSMONO_ICALL("MonoCore.Core::mq_GetFocusedWindowName", mono_GetFocusedWindowName);
     // HSMONO_ICALL("MonoCore.Core::mono_GetHoverWindowName", mono_GetHoverWindowName);
     HSMONO_ICALL("MonoCore.Core::mq_GetMQ2MonoVersion", mono_GetMQ2MonoVersion);   // legacy: mq_GetHSMonoVersion
     HSMONO_ICALL("MonoCore.Core::mq_GetHSMonoVersion", mono_GetHSMonoVersion);   // HSMono's own
@@ -881,7 +900,7 @@ void RegisterInternalCalls() {
     // HSMONO_ICALL("MonoCore.Core::mq_ExecuteCommandByName", mono_ExecuteCommandByName);
     // HSMONO_ICALL("MonoCore.Core::mq_ExecuteCommand", mono_ExecuteCommand);
     // HSMONO_ICALL("MonoCore.Core::mq_LookAt", mono_LookAt);
-    // HSMONO_ICALL("MonoCore.Core::mq_Memory_GetPageFileSize", mono_Memory_GetPageFileSize);
+    HSMONO_ICALL("MonoCore.Core::mq_Memory_GetPageFileSize", mono_Memory_GetPageFileSize);
 
     RegisterImGuiInternalCalls();
 }
