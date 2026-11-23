@@ -917,6 +917,7 @@ void RegisterInternalCalls() {
 
 HAILSTONE_API void InitializePlugin(void) {
     clientThread = std::this_thread::get_id();   // the client calls every hook on its thread
+    EnsureSettingsFile();   // hsmono.ini, made if missing; InitMono reads it when the first script starts Mono
     if (!hs::AddCommand("/mono", MonoCommand)) WriteChatf("[HSMono] /mono could not be added");
     if (!hs::AddTopLevelObject("HSMono", HSMonoTlo)) WriteChatf("[HSMono] the HSMono TLO could not be added");
     WriteChatf("[HSMono] loaded");

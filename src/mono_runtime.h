@@ -67,7 +67,7 @@ extern MonoApi mono;
 // The root domain, once InitMono has succeeded.
 extern MonoDomain* g_rootDomain;
 
-// Finds, loads and starts Mono the first time it is called (the first /mono): hsmono.ini's monoRuntimeDir, else the
+// Finds, loads and starts Mono the first time it is called (the first /mono): hsmono.ini's monodirectory, else the
 // add-on's bundled <plugin folder>/mono/, else an installed Mono. Empty when Mono is running, else a message for the
 // player saying what was tried. Call it on the client's thread.
 std::optional<std::string> InitMono();
@@ -77,7 +77,11 @@ std::optional<std::string> InitMono();
 // plugin is loaded again into a process where Mono is still up (the new plugin copy's functions replace the old's).
 void RegisterInternalCalls();
 
-// The add-on's runtime folder: hsmono.ini's monoRuntimeDir, else <plugin folder>/mono. The Mono InitMono uses may be an
+// hsmono.ini in the plugin's folder (PluginConfigDir), created with an empty monodirectory= when missing. Called from
+// InitializePlugin; InitMono reads the file each time it tries to start Mono.
+void EnsureSettingsFile();
+
+// The add-on's runtime folder: hsmono.ini's monodirectory, else <plugin folder>/mono. The Mono InitMono uses may be an
 // installed one elsewhere.
 std::filesystem::path MonoRuntimeDir();
 

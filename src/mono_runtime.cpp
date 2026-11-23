@@ -25,7 +25,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// The library's name in a runtime folder of the add-on's (bundled, or hsmono.ini's monoRuntimeDir).
+// The library's name in a runtime folder of the add-on's (bundled, or hsmono.ini's monodirectory).
 #if defined(_WIN32)
     constexpr const char* kMonoLibrary = "mono-2.0-sgen.dll";
 #elif defined(__APPLE__)
@@ -50,19 +50,27 @@ namespace {
         return n > 0 && static_cast<size_t>(n) < sizeof buf ? fs::path(std::string(buf, static_cast<size_t>(n))) : fs::path();
     }
 
-    // monoRuntimeDir=<folder> in hsmono.ini, if the player set one.
-    std::optional<fs::path> IniRuntimeDir(const fs::path& configDir) {
-        std::ifstream ini(configDir / "hsmono.ini");
-        for (std::string line; std::getline(ini, line);) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            constexpr std::string_view key = "monoRuntimeDir=";
-            if (line.rfind(key, 0) == 0 && line.size() > key.size()) {
-                const std::string value = line.substr(key.size());
-                return fs::path(std::u8string(value.begin(), value.end()));   // the ini is UTF-8
-            }
-        }
-        return std::nullopt;
+    // hsmono.ini's monodirectory, as ReadSettings last read it (InitMono, before it looks for Mono); unset when empty or
+    // not there.
+    std::optional<fs::path> iniMonoDirectory;
+
+    // Spaces and tabs off both ends.
+    std::string_view Trim(std::string_view s) {
+        while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.remove_prefix(1);
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r')) s.remove_suffix(1);
+        return s;
     }
+
+    bool KeyIs(std::string_view key, std::string_view name) {
+        if (key.size() != name.size()) return false;
+        for (size_t i = 0; i < key.size(); ++i) {
+            const char c = key[i] >= 'A' && key[i] <= 'Z' ? static_cast<char>(key[i] - 'A' + 'a') : key[i];
+            if (c != name[i]) return false;
+        }
+        return true;
+    }
+
+    std::optional<fs::path> IniRuntimeDir() { return iniMonoDirectory; }
 
     bool IsFile(const fs::path& p) {
         std::error_code ec;   // nothing may throw out of a command
@@ -81,8 +89,8 @@ namespace {
     std::vector<Candidate> Candidates(const fs::path& config) {
         std::vector<Candidate> out;
         if (!config.empty()) {
-            if (std::optional<fs::path> custom = IniRuntimeDir(config)) {
-                out.push_back({*custom / kMonoLibrary, *custom, "hsmono.ini monoRuntimeDir"});
+            if (std::optional<fs::path> custom = IniRuntimeDir()) {
+                out.push_back({*custom / kMonoLibrary, *custom, "hsmono.ini monodirectory"});
                 return out;
             }
             out.push_back({config / "mono" / kMonoLibrary, config / "mono", "bundled"});
@@ -130,13 +138,47 @@ namespace {
         return nullptr;
     }
 
+    // hsmono.ini's monodirectory: read by InitMono each time it tries to start Mono, so an edit made after the plugin
+    // loaded counts until Mono is running. Key names take any case; a line starting with ';' or '#', or a [section]
+    // line, is skipped. An empty value is no folder.
+    void ReadSettings() {
+        iniMonoDirectory.reset();
+        const fs::path config = ConfigDir();
+        if (config.empty()) return;
+        std::ifstream ini(config / "hsmono.ini", std::ios::binary);
+        for (std::string raw; std::getline(ini, raw);) {
+            const std::string_view line = Trim(raw);
+            if (line.empty() || line.front() == ';' || line.front() == '#' || line.front() == '[') continue;
+            const size_t eq = line.find('=');
+            if (eq == std::string_view::npos || !KeyIs(Trim(line.substr(0, eq)), "monodirectory")) continue;
+            const std::string_view value = Trim(line.substr(eq + 1));
+            if (value.empty()) iniMonoDirectory.reset();
+            else iniMonoDirectory = fs::path(std::u8string(value.begin(), value.end()));   // the ini is UTF-8
+        }
+    }
+
 } // namespace
 
-// The add-on's runtime folder: hsmono.ini's monoRuntimeDir, else <plugin folder>/mono. An installed Mono found by
+// hsmono.ini in the plugin's folder, made with an empty monodirectory= when it isn't there. It is only read when Mono
+// starts (ReadSettings, from InitMono).
+void EnsureSettingsFile() {
+    const fs::path config = ConfigDir();
+    if (config.empty()) return;
+    const fs::path file = config / "hsmono.ini";
+    std::error_code ec;   // nothing may throw out of InitializePlugin
+    if (fs::exists(file, ec) || ec) return;
+    std::ofstream out(file, std::ios::binary);
+    out << "; HSMono's settings, read when the first script is loaded (the first /mono load, which starts Mono).\n"
+           "; monodirectory: a Mono runtime folder to use instead of the add-on's own (<plugin folder>/mono) or an\n"
+           "; installed Mono; it holds the runtime library and the lib/ and etc/ folders Mono is configured from.\n"
+           "monodirectory=\n";
+}
+
+// The add-on's runtime folder: hsmono.ini's monodirectory, else <plugin folder>/mono. An installed Mono found by
 // InitMono may be elsewhere.
 fs::path MonoRuntimeDir() {
     const fs::path config = ConfigDir();
-    if (auto custom = IniRuntimeDir(config)) return *custom;
+    if (auto custom = IniRuntimeDir()) return *custom;
     return config / "mono";
 }
 
@@ -147,32 +189,45 @@ std::optional<std::string> InitMono() {
     static std::optional<std::string> failure;   // after the JIT started, a failure is final until restart
     if (started) return failure;
 
-    std::string tried;
+    ReadSettings();   // hsmono.ini's monodirectory, read now: nothing of Mono is loaded before the first script
+    // What was configured and tried, in order: in chat with the result either way, so a player can see which Mono
+    // was taken and why the ones before it were not.
+    const std::string configured = iniMonoDirectory ? "hsmono.ini monodirectory: " + Utf8(*iniMonoDirectory)
+                                                    : std::string("hsmono.ini monodirectory: not set");
+    std::vector<std::string> skipped;   // "<source> <library>: <why>", for each candidate passed over
+    auto report = [&](const std::string& chosen) {
+        WriteChatf("[HSMono] %s", configured.c_str());
+        for (const std::string& line : skipped) WriteChatf("[HSMono] skipped %s", line.c_str());
+        WriteChatf("[HSMono] %s", chosen.c_str());
+    };
     for (const Candidate& c : Candidates(ConfigDir())) {
         const std::string where = std::string(c.source) + " " + Utf8(c.library);
         if (std::optional<std::string> why = Unusable(c)) {
-            tried += "\n  " + where + ": " + *why;
+            skipped.push_back(where + ": " + *why);
             continue;
         }
         std::string error;
         void* handle = OpenLibrary(c.library, error);   // never unloaded: Mono cannot be stopped and started again
         if (!handle) {
-            tried += "\n  " + where + ": did not load (" + error + ")";
+            skipped.push_back(where + ": did not load (" + error + ")");
             continue;
         }
 
         // From here on this candidate is the one: a second Mono in the same process would not work.
-        if (const char* missing = BindAll(handle)) return where + " is missing " + missing;
+        if (const char* missing = BindAll(handle)) return configured + "\n" + where + " is missing " + missing;
 
         // Loaded again after /plugin unload: the runtime is still up in this process, so join it.
         if (MonoDomain* existing = mono.mono_get_root_domain()) {
             g_rootDomain = existing;
             started = true;
+            report("using " + where + " (the runtime already running in this process)");
             RegisterInternalCalls();   // the new plugin copy's functions replace the old copy's
             return std::nullopt;
         }
 
         started = true;
+        const std::string dirs = c.root ? "Mono's folders: lib " + Utf8(*c.root / "lib") + ", etc " + Utf8(*c.root / "etc")
+                                        : std::string("Mono's folders: the runtime's own prefix (no mono_set_dirs)");
         if (c.root) {
             // mono_set_dirs keeps these pointers: they must outlive the runtime.
             static std::string libDir8, etcDir8;
@@ -182,13 +237,19 @@ std::optional<std::string> InitMono() {
         }
         mono.mono_config_parse(nullptr);
         g_rootDomain = mono.mono_jit_init_version("Mono_Domain", "v4.0.30319");
-        if (!g_rootDomain) return failure = "mono_jit_init failed with " + where + "; restart Hailstone to try again";
+        if (!g_rootDomain)
+            return failure = configured + "\n" + dirs + "\nmono_jit_init failed with " + where +
+                             "; restart Hailstone to try again";
 
         RegisterInternalCalls();   // once, before any assembly loads
+        report("using " + where);
+        WriteChatf("[HSMono] %s", dirs.c_str());
         char* build = mono.mono_get_runtime_build_info();   // an installed Mono may not be the version you tested
-        WriteChatf("[hsmono] Mono %s: %s", build ? build : "(unknown version)", where.c_str());
+        WriteChatf("[HSMono] Mono %s", build ? build : "(unknown version)");
         if (build) mono.mono_free(build);
         return std::nullopt;
     }
-    return "No usable Mono runtime. Tried:" + tried;
+    std::string message = configured + "\nNo usable Mono runtime. Tried:";
+    for (const std::string& line : skipped) message += "\n  " + line;
+    return message;
 }
