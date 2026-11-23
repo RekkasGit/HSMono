@@ -243,6 +243,25 @@ void mono_ClearCommands() {
     if (script && MayCallHost()) script->ClearCommands();
 }
 
+// mq_GetXtargetInfo: one record per extended target slot, slot 0 first: i32 type (XTargetType), i32 spawn id, i32 aggro
+// percent, i32 HP percent. MQ2Mono wrote those 16 bytes per slot itself; the client's get_xtarget_data_bulk writes the
+// same record (HS_BulkXTargetData), so it fills the buffer directly. The slots are every one the server sent (RoF2:
+// at most 20), where MQ2Mono walked the client's list.
+// The buffer stays the scripts' to read after the call: E3 keeps the pointer and reads it again for 250 ms. So it is
+// this plugin's own, not the bulk buffer (which goes back when the callback ends). Rewritten at each call, as
+// MQ2Mono's static one was.
+static_assert(sizeof(HS_BulkXTargetData) == 16 && HS_BULK_XTARGET_RECORD_SIZE == 16,
+              "mq_GetXtargetInfo's record is MQ2Mono's 16 bytes");
+unsigned char xtargetInfo[1024];   // 64 slots
+
+unsigned char* mono_GetXtargetInfo(int32_t* bufferLength) {
+    int32_t written = 0;
+    if (MayCallHost() && HAILSTONE_HOST_HAS(host, get_xtarget_data_bulk))
+        written = host->get_xtarget_data_bulk(host->host, xtargetInfo, static_cast<int32_t>(sizeof xtargetInfo));
+    if (bufferLength) *bufferLength = written > 0 ? written : 0;   // 0: no slots, or without 'read'
+    return xtargetInfo;
+}
+
 } // namespace
 
 // mono_runtime.h. The namespace and classes are fixed by the C# side: MonoCore.Core here, MonoCore.E3ImGUI in
@@ -270,7 +289,7 @@ void RegisterInternalCalls() {
     // HSMONO_ICALL("MonoCore.Core::mq_GetPetBuffData", mono_GetPetBuffData);
     // HSMONO_ICALL("MonoCore.Core::mq_GetTargetBuffData", mono_GetTargetBuffData);
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns3_Delta", mono_GetSpawns3_Delta);
-    // HSMONO_ICALL("MonoCore.Core::mq_GetXtargetInfo", mono_GetXtargetInfo);
+    HSMONO_ICALL("MonoCore.Core::mq_GetXtargetInfo", mono_GetXtargetInfo);
     // HSMONO_ICALL("MonoCore.Core::mq_GetAvailableAAIds", mono_GetAvailableAAIds);
     // HSMONO_ICALL("MonoCore.Core::mq_GetAvilableDiscIds", mono_GetAvilableDiscIds);
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpellIds", mono_GetSpellIds);
