@@ -7,8 +7,10 @@
 #include "hsmono.hpp"
 
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -329,6 +331,154 @@ MonoString* mono_GetHSMonoVersion() { return NewString(kHsMonoVersion); }
 // en-US). The same answer as mq_GetHSMonoVersion.
 MonoString* mono_GetMQ2MonoVersion() { return NewString(kHsMonoVersion); }
 
+// ---- spells: get_spells_data_bulk and get_spells_by_name_data_bulk (docs/plugins.md "get_spells_data_bulk")
+
+// MQ's IsNumber, as MQ2Mono's spell calls use it: an id when the query is all digits, else a name.
+bool IsSpellId(const std::string& s) {
+    return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
+}
+
+// One spell's bulk record, from its fixed part to its last effect line, for MQ2Mono's GetSpellByID or GetSpellByName:
+// by name, the first spell of that name in get_spells_by_name_data_bulk's order (lowest id first). Empty when the
+// client holds no such spell or can't be asked (no 'read', older client).
+// NOTE: which of several spells of one name MQ's GetSpellByName picks is not confirmed; this takes the lowest id.
+// The record is in a buffer of this file's, good until the next call (E3 asks for one spell 13 times in a row, so the
+// buffer is made once, not each time).
+std::span<const unsigned char> SpellRecord(const std::string& query) {
+    static std::vector<unsigned char> out(64 * 1024);   // a spell's ranks by name: a few hundred bytes to ~2 KiB each
+    int32_t n = 0;
+    if (IsSpellId(query)) {
+        if (!HAILSTONE_HOST_HAS(host, get_spells_data_bulk)) return {};
+        const long id = std::strtol(query.c_str(), nullptr, 10);
+        const int32_t ids[1] = {id > 0 && id <= INT32_MAX ? static_cast<int32_t>(id) : 0};
+        n = host->get_spells_data_bulk(host->host, ids, 1, out.data(), static_cast<int32_t>(out.size()));
+    } else {
+        if (!HAILSTONE_HOST_HAS(host, get_spells_by_name_data_bulk)) return {};
+        n = host->get_spells_by_name_data_bulk(host->host, query.c_str(), out.data(), static_cast<int32_t>(out.size()));
+    }
+    int32_t count = 0;
+    HS_BulkSpellFixedRecord record{};
+    if (n < HS_BULK_SPELL_HEADER_SIZE + HS_BULK_SPELL_RECORD_SIZE) return {};
+    std::memcpy(&count, out.data(), sizeof count);
+    std::memcpy(&record, out.data() + HS_BULK_SPELL_HEADER_SIZE, sizeof record);
+    if (count < 1 || !record.found || record.recordSize < HS_BULK_SPELL_RECORD_SIZE ||
+        record.recordSize > n - HS_BULK_SPELL_HEADER_SIZE)
+        return {};
+    return std::span<const unsigned char>(out.data() + HS_BULK_SPELL_HEADER_SIZE,
+                                          static_cast<size_t>(record.recordSize));
+}
+
+// A spell's effect slots and the client's text for those that have one (MQ's ParseSpellEffect: "Slot <n>: ...").
+struct SpellEffects {
+    int32_t slotCount = 0;
+    std::vector<std::string> lines;   // in slot order; a slot with nothing to show has none
+};
+
+std::optional<SpellEffects> EffectsOf(const std::string& query) {
+    const std::span<const unsigned char> rec = SpellRecord(query);
+    if (rec.empty()) return std::nullopt;
+    HS_BulkSpellFixedRecord fixed;
+    std::memcpy(&fixed, rec.data(), sizeof fixed);
+    SpellEffects out;
+    out.slotCount = fixed.slotCount;
+    // Past the slots and the class levels, then stringCount strings, then effectCount lines: each a u16 length and
+    // its bytes.
+    size_t at = HS_BULK_SPELL_RECORD_SIZE + static_cast<size_t>(fixed.slotCount) * static_cast<size_t>(fixed.slotSize) +
+                static_cast<size_t>(fixed.classCount);
+    for (int32_t i = 0; i < fixed.stringCount + fixed.effectCount; ++i) {
+        uint16_t len = 0;
+        if (at + sizeof len > rec.size()) break;
+        std::memcpy(&len, rec.data() + at, sizeof len);
+        at += sizeof len;
+        if (at + len > rec.size()) break;
+        if (i >= fixed.stringCount) out.lines.emplace_back(reinterpret_cast<const char*>(rec.data() + at), len);
+        at += len;
+    }
+    return out;
+}
+
+// mq_GetSpellDataEffectCount: the spell's effect slots (MQ2Mono's GetSpellNumEffects), -1 for no such spell. An id or
+// a name. 12 for a stock RoF2 spell, blank slots included.
+// NOTE: GetSpellNumEffects is taken as the spell's slot count; if MQ counts only the slots in use, E3 asks here for a
+// few more lines than it would there, each of them "".
+int32_t mono_GetSpellDataEffectCount(MonoString* query) {
+    if (!MayCallHost()) return -1;
+    const std::optional<SpellEffects> effects = EffectsOf(Utf8(query));
+    return effects ? effects->slotCount : -1;
+}
+
+// mq_GetSpellDataEffect: slot `line`'s text (0 is slot 1), MQ's ParseSpellEffect as MQ2Mono gives it: "" for a slot
+// with nothing to show, "NULL" for no such spell or a line out of range. Each call reads the whole spell again (as
+// MQ2Mono's looked it up again): mq_GetSpellsData gets every slot's text at once.
+MonoString* mono_GetSpellDataEffect(MonoString* query, int32_t line) {
+    if (!MayCallHost()) return NewString("NULL");
+    const std::optional<SpellEffects> effects = EffectsOf(Utf8(query));
+    if (!effects || line < 0 || line >= effects->slotCount) return NewString("NULL");
+    const std::string prefix = "Slot " + std::to_string(line + 1) + ": ";
+    for (const std::string& text : effects->lines)
+        if (text.compare(0, prefix.size(), prefix) == 0) return NewString(text.c_str());
+    return NewString("");
+}
+
+// HSMono's own, for scripts moving off the two above: get_spells_data_bulk's records as they are, so a script reads
+// every field and every effect line of many spells in one call (docs/plugins.md "get_spells_data_bulk" has the
+// layout: an i32 count, then one record per spell, each stepped by its recordSize). The buffer is this plugin's and
+// stays the script's to read until its next call of the same function.
+// Made at load at a size that holds what scripts ask for (a spell record is a few hundred bytes to ~2 KiB): 1 MiB is
+// some 500 spells by id, 64 KiB every rank of a name. A read that needs more grows its buffer, which then keeps that
+// size: neither is ever made smaller, so a script's calls don't allocate.
+std::vector<unsigned char> spellsData(1024 * 1024);
+std::vector<unsigned char> spellsByNameData(64 * 1024);
+
+// Grows `buf` (never shrinks it) to at least `first`, then on until the read leaves room for one more record: the
+// reads give whole records only.
+template <typename Read>
+int32_t ReadSpells(std::vector<unsigned char>& buf, size_t first, int32_t wanted, Read read) {
+    if (buf.size() < first) buf.resize(first);
+    int32_t n = 0;
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        n = read(buf.data(), static_cast<int32_t>(buf.size()));
+        int32_t count = 0;
+        if (n >= HS_BULK_SPELL_HEADER_SIZE) std::memcpy(&count, buf.data(), sizeof count);
+        const bool all = wanted >= 0 ? count >= wanted : static_cast<size_t>(n) + 8192 <= buf.size();
+        if (n < HS_BULK_SPELL_HEADER_SIZE || all) break;
+        buf.resize(buf.size() * 2);
+    }
+    return n > 0 ? n : 0;
+}
+
+// mq_GetSpellsData(int[] ids, out int length): a record per id, in order (found 0 for an id the client has no spell
+// for).
+unsigned char* mono_GetSpellsData(MonoArray* ids, int32_t* length) {
+    int32_t n = 0;
+    const size_t count = ids ? mono.mono_array_length(ids) : 0;
+    if (count > 0 && count <= 100000 && MayCallHost() && HAILSTONE_HOST_HAS(host, get_spells_data_bulk)) {
+        const auto* first = reinterpret_cast<const int32_t*>(mono.mono_array_addr_with_size(ids, sizeof(int32_t), 0));
+        const auto wanted = static_cast<int32_t>(count);
+        n = ReadSpells(spellsData, HS_BULK_SPELL_HEADER_SIZE + count * 2048, wanted, [&](unsigned char* out, int32_t size) {
+            return host->get_spells_data_bulk(host->host, first, wanted, out, size);
+        });
+    }
+    if (n == 0) std::memset(spellsData.data(), 0, HS_BULK_SPELL_HEADER_SIZE);   // count 0
+    if (length) *length = n;
+    return spellsData.data();
+}
+
+// mq_GetSpellsDataByName(string name, out int length): every spell of that name (any case, the whole name), lowest id
+// first.
+unsigned char* mono_GetSpellsDataByName(MonoString* name, int32_t* length) {
+    int32_t n = 0;
+    const std::string wanted = Utf8(name);
+    if (!wanted.empty() && MayCallHost() && HAILSTONE_HOST_HAS(host, get_spells_by_name_data_bulk)) {
+        n = ReadSpells(spellsByNameData, 0, -1, [&](unsigned char* out, int32_t size) {
+            return host->get_spells_by_name_data_bulk(host->host, wanted.c_str(), out, size);
+        });
+    }
+    if (n == 0) std::memset(spellsByNameData.data(), 0, HS_BULK_SPELL_HEADER_SIZE);
+    if (length) *length = n;
+    return spellsByNameData.data();
+}
+
 } // namespace
 
 // mono_runtime.h. The namespace and classes are fixed by the C# side: MonoCore.Core here, MonoCore.E3ImGUI in
@@ -343,8 +493,11 @@ void RegisterInternalCalls() {
     HSMONO_ICALL("MonoCore.Core::mq_AddCommand", mono_AddCommand);
     HSMONO_ICALL("MonoCore.Core::mq_ClearCommands", mono_ClearCommands);
     HSMONO_ICALL("MonoCore.Core::mq_RemoveCommand", mono_RemoveCommand);
-    // HSMONO_ICALL("MonoCore.Core::mq_GetSpellDataEffectCount", mono_GetSpellDataEffectCount);
-    // HSMONO_ICALL("MonoCore.Core::mq_GetSpellDataEffect", mono_GetSpellDataEffect);
+    HSMONO_ICALL("MonoCore.Core::mq_GetSpellDataEffectCount", mono_GetSpellDataEffectCount);
+    HSMONO_ICALL("MonoCore.Core::mq_GetSpellDataEffect", mono_GetSpellDataEffect);
+    // HSMono's own: whole spell records (get_spells_data_bulk's layout), for scripts moving off the two above.
+    HSMONO_ICALL("MonoCore.Core::mq_GetSpellsData", mono_GetSpellsData);
+    HSMONO_ICALL("MonoCore.Core::mq_GetSpellsDataByName", mono_GetSpellsDataByName);
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns", mono_GetSpawns);
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns2", mono_GetSpawns2);
 

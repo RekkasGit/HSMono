@@ -50,6 +50,7 @@
     X(mono_get_single_class)             \
     X(mono_array_new)                    \
     X(mono_array_addr_with_size)         \
+    X(mono_array_length)                 \
     /* strings */                        \
     X(mono_string_new)                   \
     X(mono_string_to_utf8)               \
