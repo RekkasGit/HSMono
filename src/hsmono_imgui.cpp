@@ -2,19 +2,25 @@
 // MQ2MonoImGui.cpp). They draw into the client's own Dear ImGui context (host->imgui_context), with this plugin's copy
 // of the same Dear ImGui version (plugins/hsmono/CMakeLists.txt).
 //
-// Written for Dear ImGui 1.92.5, the client's version. Where Hailstone has no counterpart, a call does the safest thing
-// and says so in its comment: MQ's EverQuest fonts, spell icons and textures (no plugin API for them yet).
+// Written for Dear ImGui 1.93, the client's version. A script passes Dear ImGui's enums as plain numbers, and they go
+// to Dear ImGui as they are: the C# side's enums (E3ImGui.cs) give 1.93's numbers, and imgui_GetVersionNum and
+// imgui_HasDocking tell a script which Dear ImGui it is drawing with. Where Hailstone has no counterpart, a call does
+// the safest thing and says so in its comment: MQ's EverQuest fonts, spell icons and textures (no plugin API for them
+// yet).
 #include "hsmono.hpp"
 
 #include <cstring>
 #include <deque>
 #include <initializer_list>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "imgui.h"
 #include "imgui_internal.h"   // ItemSize, ItemAdd, CalcItemSize, the current window, error recovery
 #include "imgui_stdlib.h"     // InputText into a std::string
+
+static_assert(IMGUI_VERSION_NUM >= 19300, "hsmono_imgui.cpp is written for Dear ImGui 1.93");
 
 namespace {
 
@@ -51,6 +57,23 @@ MonoArray* IntArray(std::initializer_list<int32_t> values) {
 
 // The state a script's widgets keep between frames (its maps in monoAppDomainInfo); null from the root domain.
 monoAppDomainInfo* Script() { return CurrentScript(); }
+
+// A style variable's slot in ImGuiStyle when it holds `count` floats (1 or 2); null for an unknown or other one.
+float* StyleVarSlot(int var, unsigned count) {
+    if (var < 0 || var >= ImGuiStyleVar_COUNT) return nullptr;   // GetStyleVarInfo asserts on one out of range
+    const ImGuiStyleVarInfo* info = ImGui::GetStyleVarInfo(var);
+    if (!info || info->DataType != ImGuiDataType_Float || info->Count != count) return nullptr;
+    return static_cast<float*>(info->GetVarPtr(&ImGui::GetStyle()));
+}
+
+// Since 1.92.9 Dear ImGui writes a typed number back only when it is confirmed; MQ2Mono's scripts read it back every
+// frame, as Dear ImGui did before. Held around each number widget.
+struct LiveEdit {
+    LiveEdit() { ImGui::PushItemFlag(ImGuiItemFlags_LiveEditOnInputScalar, true); }
+    ~LiveEdit() { ImGui::PopItemFlag(); }
+    LiveEdit(const LiveEdit&) = delete;
+    LiveEdit& operator=(const LiveEdit&) = delete;
+};
 
 // ---- windows
 
@@ -132,10 +155,24 @@ void mono_ImGUI_SameLineEx(float offset_from_start_x, float spacing) { ImGui::Sa
 float mono_ImGUI_GetContentRegionAvailX() { return ImGui::GetContentRegionAvail().x; }
 float mono_ImGUI_GetContentRegionAvailY() { return ImGui::GetContentRegionAvail().y; }
 void mono_ImGUI_SetNextItemWidth(float width) { ImGui::SetNextItemWidth(width); }
-void mono_ImGUI_PushItemWidth(float width) { ImGui::PushItemWidth(width); }
-void mono_ImGUI_PopItemWidth(float) { ImGui::PopItemWidth(); }
-void mono_ImGUI_PushID(int id) { ImGui::PushID(id); }
-void mono_ImGUI_PopID() { ImGui::PopID(); }
+// These four, SetClipboardText, Checkbox_Clear and Internal_CalcItemSize are bool in E3's C# and returned nothing in
+// MQ2Mono, so C# read whatever the register held. They return true here (or what they report).
+bool mono_ImGUI_PushItemWidth(float width) {
+    ImGui::PushItemWidth(width);
+    return true;
+}
+bool mono_ImGUI_PopItemWidth() {   // no argument in C# (MQ2Mono's C++ took a float it never got)
+    ImGui::PopItemWidth();
+    return true;
+}
+bool mono_ImGUI_PushID(int id) {
+    ImGui::PushID(id);
+    return true;
+}
+bool mono_ImGUI_PopID() {
+    ImGui::PopID();
+    return true;
+}
 
 float mono_ImGUI_GetTextLineHeight() { return ImGui::GetTextLineHeight(); }
 float mono_ImGUI_GetTextLineHeightWithSpacing() { return ImGui::GetTextLineHeightWithSpacing(); }
@@ -143,12 +180,13 @@ float mono_ImGUI_GetFrameHeight() { return ImGui::GetFrameHeight(); }
 
 void mono_ImGUI_Internal_ItemSize(float x, float y, float text_baseline_y) { ImGui::ItemSize(ImVec2(x, y), text_baseline_y); }
 bool mono_ImGUI_Internal_ItemAdd(float x, float y, float x2, float y2) { return ImGui::ItemAdd(ImRect(x, y, x2, y2), 0); }
-void mono_ImGUI_Internal_CalcItemSize(float x, float y, float default_w, float* r_x, float* r_y) {
-    if (!r_x || !r_y) return;
+bool mono_ImGUI_Internal_CalcItemSize(float x, float y, float default_w, float* r_x, float* r_y) {
+    if (!r_x || !r_y) return false;
     const ImGuiContext& g = *ImGui::GetCurrentContext();
     const ImVec2 size = ImGui::CalcItemSize(ImVec2(x, y), default_w, g.FontSize + g.Style.FramePadding.y * 2.0f);
     *r_x = size.x;
     *r_y = size.y;
+    return true;
 }
 
 // ---- items
@@ -188,7 +226,10 @@ MonoArray* mono_ImGUI_CalcTextSize(MonoString* input) {
     const ImVec2 v = ImGui::CalcTextSize(Str(input).c_str());
     return FloatArray({v.x, v.y});
 }
-void mono_ImGUI_SetClipboardText(MonoString* text) { ImGui::SetClipboardText(Str(text).c_str()); }
+bool mono_ImGUI_SetClipboardText(MonoString* text) {
+    ImGui::SetClipboardText(Str(text).c_str());
+    return true;
+}
 
 // ---- buttons, selectables, checkboxes
 
@@ -222,8 +263,9 @@ bool mono_ImGUI_Checkbox(MonoString* name, bool currentValue) {
     value = currentValue;
     return ImGui::Checkbox(str.c_str(), &value);
 }
-void mono_ImGUI_Checkbox_Clear(MonoString* id) {
-    if (monoAppDomainInfo* s = Script()) s->m_IMGUI_CheckboxValues.erase(Str(id));
+bool mono_ImGUI_Checkbox_Clear(MonoString* id) {   // true when there was one
+    monoAppDomainInfo* s = Script();
+    return s && s->m_IMGUI_CheckboxValues.erase(Str(id)) > 0;
 }
 bool mono_ImGUI_Checkbox_Get(MonoString* id) {
     monoAppDomainInfo* s = Script();
@@ -289,7 +331,7 @@ MonoString* mono_ImGUI_TableGetColumnName(int column) { return NewString(ImGui::
 void mono_ImGUI_TableNextRow() { ImGui::TableNextRow(); }
 void mono_ImGUI_TableNextRowEx(int row_flags, float min_row_height) { ImGui::TableNextRow(row_flags, min_row_height); }
 bool mono_ImGUI_TableNextColumn() { return ImGui::TableNextColumn(); }
-void mono_ImGUI_TableSetColumnIndex(int index) { ImGui::TableSetColumnIndex(index); }
+bool mono_ImGUI_TableSetColumnIndex(int index) { return ImGui::TableSetColumnIndex(index); }   // bool in C# too
 void mono_ImGUI_TableSetBgColor(int target, unsigned int color, int column) {
     ImGui::TableSetBgColor(target, static_cast<ImU32>(color), column);
 }
@@ -339,60 +381,46 @@ MonoArray* mono_ImGUI_ColorPicker_GetRGBA_Float(MonoString* label) {
 
 // ---- style
 
+// Dear ImGui asserts on a colour or style variable out of range, and on a push of the wrong type, so they are checked
+// here first: the C# side gives -1 for a name this Dear ImGui lacks (DockingPreview without docking, say). A push that
+// can't be honoured still pushes, the current text colour or alpha unchanged, so the script's PopStyleColor /
+// PopStyleVar counts stay right.
+bool IsColour(int col) { return col >= 0 && col < ImGuiCol_COUNT; }
 MonoArray* mono_ImGUI_GetStyleColorVec4(int flag) {
+    if (!IsColour(flag)) return FloatArray({0.0f, 0.0f, 0.0f, 0.0f});
     const ImVec4 c = ImGui::GetStyleColorVec4(flag);
     return FloatArray({c.x, c.y, c.z, c.w});
 }
-uint32_t mono_ImGUI_GetColorU32(int imguiCol, float alpha_mul) { return ImGui::GetColorU32(imguiCol, alpha_mul); }
+uint32_t mono_ImGUI_GetColorU32(int imguiCol, float alpha_mul) {
+    return IsColour(imguiCol) ? ImGui::GetColorU32(imguiCol, alpha_mul) : 0;
+}
 void mono_ImGUI_PushStyleColor(int which, float r, float g, float b, float a) {
-    ImGui::PushStyleColor(which, ImVec4(r, g, b, a));
+    if (IsColour(which)) ImGui::PushStyleColor(which, ImVec4(r, g, b, a));
+    else ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
 }
 void mono_ImGUI_PopStyleColor(int count) { ImGui::PopStyleColor(count); }
-void mono_ImGUI_PushStyleVarFloat(int which, float value) { ImGui::PushStyleVar(which, value); }
-void mono_ImGUI_PushStyleVarVec2(int which, float x, float y) { ImGui::PushStyleVar(which, ImVec2(x, y)); }
+void mono_ImGUI_PushStyleVarFloat(int which, float value) {
+    if (StyleVarSlot(which, 1)) ImGui::PushStyleVar(which, value);
+    else ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha);
+}
+void mono_ImGUI_PushStyleVarVec2(int which, float x, float y) {
+    if (StyleVarSlot(which, 2)) ImGui::PushStyleVar(which, ImVec2(x, y));
+    else ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha);
+}
 void mono_ImGUI_PopStyleVar(int count) { ImGui::PopStyleVar(count); }
 
+// Any float or ImVec2 style variable, where MQ2Mono's switch knew sixteen and nine; 0 for any other.
 float mono_ImGUI_GetStyleVarFloat(int which) {
-    const ImGuiStyle& style = ImGui::GetStyle();
-    switch (which) {
-    case ImGuiStyleVar_Alpha: return style.Alpha;
-    case ImGuiStyleVar_DisabledAlpha: return style.DisabledAlpha;
-    case ImGuiStyleVar_WindowRounding: return style.WindowRounding;
-    case ImGuiStyleVar_WindowBorderSize: return style.WindowBorderSize;
-    case ImGuiStyleVar_ChildRounding: return style.ChildRounding;
-    case ImGuiStyleVar_ChildBorderSize: return style.ChildBorderSize;
-    case ImGuiStyleVar_PopupRounding: return style.PopupRounding;
-    case ImGuiStyleVar_PopupBorderSize: return style.PopupBorderSize;
-    case ImGuiStyleVar_FrameRounding: return style.FrameRounding;
-    case ImGuiStyleVar_FrameBorderSize: return style.FrameBorderSize;
-    case ImGuiStyleVar_IndentSpacing: return style.IndentSpacing;
-    case ImGuiStyleVar_ScrollbarSize: return style.ScrollbarSize;
-    case ImGuiStyleVar_ScrollbarRounding: return style.ScrollbarRounding;
-    case ImGuiStyleVar_GrabMinSize: return style.GrabMinSize;
-    case ImGuiStyleVar_GrabRounding: return style.GrabRounding;
-    case ImGuiStyleVar_TabRounding: return style.TabRounding;
-    default: return 0.0f;
-    }
+    const float* v = StyleVarSlot(which, 1);
+    return v ? v[0] : 0.0f;
 }
 
-void mono_ImGUI_GetStyleVarVec2(int which, float* x, float* y) {
+// E3's C# declares `out int x, out int y`, so whole numbers are written (MQ2Mono wrote floats into those ints).
+void mono_ImGUI_GetStyleVarVec2(int which, int32_t* x, int32_t* y) {
     if (!x || !y) return;
-    const ImGuiStyle& style = ImGui::GetStyle();
-    ImVec2 v(0.0f, 0.0f);
-    switch (which) {
-    case ImGuiStyleVar_WindowPadding: v = style.WindowPadding; break;
-    case ImGuiStyleVar_WindowMinSize: v = style.WindowMinSize; break;
-    case ImGuiStyleVar_WindowTitleAlign: v = style.WindowTitleAlign; break;
-    case ImGuiStyleVar_FramePadding: v = style.FramePadding; break;
-    case ImGuiStyleVar_ItemSpacing: v = style.ItemSpacing; break;
-    case ImGuiStyleVar_ItemInnerSpacing: v = style.ItemInnerSpacing; break;
-    case ImGuiStyleVar_CellPadding: v = style.CellPadding; break;
-    case ImGuiStyleVar_ButtonTextAlign: v = style.ButtonTextAlign; break;
-    case ImGuiStyleVar_SelectableTextAlign: v = style.SelectableTextAlign; break;
-    default: break;
-    }
-    *x = v.x;
-    *y = v.y;
+    const float* v = StyleVarSlot(which, 2);
+    *x = v ? static_cast<int32_t>(v[0]) : 0;
+    *y = v ? static_cast<int32_t>(v[1]) : 0;
 }
 
 // ---- combos, popups, trees, tooltips
@@ -460,6 +488,7 @@ bool mono_ImGUI_InputInt(MonoString* id, int current, int steps, int fastSteps) 
     const std::string idStr = Str(id);
     int& value = s->m_IMGUI_InputIntValues[idStr];
     value = current;
+    LiveEdit live;
     return ImGui::InputInt(idStr.c_str(), &value, steps, fastSteps);
 }
 int mono_ImGUI_InputInt_Get(MonoString* id) {
@@ -476,6 +505,7 @@ bool mono_ImGUI_InputInt_Clear(MonoString* id) {
 bool mono_ImGUI_SliderInt(MonoString* id, int* value, int minValue, int maxValue) {
     if (!id || !value) return false;
     int v = *value;
+    LiveEdit live;   // Ctrl+click types a number into a slider
     const bool changed = ImGui::SliderInt(Str(id).c_str(), &v, minValue, maxValue);
     if (changed) *value = v;
     return changed;
@@ -484,6 +514,7 @@ bool mono_ImGUI_SliderDouble(MonoString* id, double* value, double minValue, dou
     if (!id || !value) return false;
     const std::string format = fmt ? Str(fmt) : std::string("%.3f");
     double v = *value;
+    LiveEdit live;
     const bool changed =
         ImGui::SliderScalar(Str(id).c_str(), ImGuiDataType_Double, &v, &minValue, &maxValue, format.c_str());
     if (changed) *value = v;
@@ -501,7 +532,8 @@ void mono_ImGUI_Image(void* textureId, float width, float height) {
     }
     ImGui::Image(ImTextureRef(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(textureId))), ImVec2(width, height));
 }
-void* mono_CreateTextureFromData(const uint8_t*, int, int, int) { return nullptr; }   // a placeholder in MQ2Mono too
+// The C# side passes a byte[] (a MonoArray, not the bytes). A placeholder in MQ2Mono too.
+void* mono_CreateTextureFromData(MonoArray*, int, int, int) { return nullptr; }
 void mono_DestroyTexture(void*) {}
 
 // MQ draws the game's A_SpellGems animation. A plugin has no way to draw a spell icon in ImGui yet (the client's only
@@ -583,17 +615,38 @@ void mono_ImGUI_PushMaterialIconsFont() {
 
 ImDrawList* DrawList() { return ImGui::GetWindowDrawList(); }
 
-void mono_ImGUI_GetWindowDrawList_AddLine(float x, float y, float x_end, float y_end, unsigned int color, float thickness) {
-    if (ImDrawList* d = DrawList()) d->AddLine(ImVec2(x, y), ImVec2(x_end, y_end), color, thickness);
+// 1.93 draws nothing for a rectangle whose min is past its max; Dear ImGui drew it before, and scripts rely on that.
+void Ordered(float& lo, float& hi) {
+    if (lo > hi) std::swap(lo, hi);
+}
+
+// 1.93 moved outlines by up to a pixel and changed their joins; ImDrawFlags_StrokeLegacy keeps MQ2Mono's. Every outline
+// a script draws gets it, unless the script chose a stroke position itself (AddRect's flags).
+int Stroke(int flags = 0) { return (flags & ImDrawFlags_StrokeMask_) ? flags : flags | ImDrawFlags_StrokeLegacy; }
+
+// float[] in E3's C#; MQ2Mono returned nothing, which C# would take as an array. Null, which C# can hold safely.
+MonoArray* mono_ImGUI_GetWindowDrawList_AddLine(float x, float y, float x_end, float y_end, unsigned int color,
+                                                float thickness) {
+    if (ImDrawList* d = DrawList()) d->AddLine(ImVec2(x, y), ImVec2(x_end, y_end), color, thickness, Stroke());
+    return nullptr;
 }
 void mono_ImGUI_GetWindowDrawList_AddRect(float p_min_x, float p_min_y, float p_max_x, float p_max_y, unsigned int color,
                                           float rounding, int rounding_corners_flags, float thickness) {
-    if (ImDrawList* d = DrawList())
-        d->AddRect(ImVec2(p_min_x, p_min_y), ImVec2(p_max_x, p_max_y), color, rounding, rounding_corners_flags, thickness);
+    ImDrawList* d = DrawList();
+    if (!d) return;
+    Ordered(p_min_x, p_max_x);
+    Ordered(p_min_y, p_max_y);
+    // Thickness before flags since 1.92.8; the C# side keeps MQ2Mono's order of arguments.
+    d->AddRect(ImVec2(p_min_x, p_min_y), ImVec2(p_max_x, p_max_y), color, rounding, thickness,
+               Stroke(rounding_corners_flags));
 }
 void mono_ImGUI_GetWindowDrawList_AddRectFilled(float x1, float y1, float x2, float y2, uint32_t color, float rounding,
                                                 int rounding_corners_flags) {
-    if (ImDrawList* d = DrawList()) d->AddRectFilled(ImVec2(x1, y1), ImVec2(x2, y2), color, rounding, rounding_corners_flags);
+    ImDrawList* d = DrawList();
+    if (!d) return;
+    Ordered(x1, x2);
+    Ordered(y1, y2);
+    d->AddRectFilled(ImVec2(x1, y1), ImVec2(x2, y2), color, rounding, rounding_corners_flags);
 }
 void mono_ImGUI_GetWindowDrawList_AddRectFilledMultiColor(float p_min_x, float p_min_y, float p_max_x, float p_max_y,
                                                           unsigned int col_upr_left, unsigned int col_upr_right,
@@ -605,7 +658,7 @@ void mono_ImGUI_GetWindowDrawList_AddRectFilledMultiColor(float p_min_x, float p
 void mono_ImGUI_GetWindowDrawList_AddQuad(float p1_x, float p1_y, float p2_x, float p2_y, float p3_x, float p3_y,
                                           float p4_x, float p4_y, unsigned int color, float thickness) {
     if (ImDrawList* d = DrawList())
-        d->AddQuad(ImVec2(p1_x, p1_y), ImVec2(p2_x, p2_y), ImVec2(p3_x, p3_y), ImVec2(p4_x, p4_y), color, thickness);
+        d->AddQuad(ImVec2(p1_x, p1_y), ImVec2(p2_x, p2_y), ImVec2(p3_x, p3_y), ImVec2(p4_x, p4_y), color, thickness, Stroke());
 }
 void mono_ImGUI_GetWindowDrawList_AddQuadFilled(float p1_x, float p1_y, float p2_x, float p2_y, float p3_x, float p3_y,
                                                 float p4_x, float p4_y, unsigned int color) {
@@ -614,7 +667,8 @@ void mono_ImGUI_GetWindowDrawList_AddQuadFilled(float p1_x, float p1_y, float p2
 }
 void mono_ImGUI_GetWindowDrawList_AddTriangle(float p1_x, float p1_y, float p2_x, float p2_y, float p3_x, float p3_y,
                                               unsigned int color, float thickness) {
-    if (ImDrawList* d = DrawList()) d->AddTriangle(ImVec2(p1_x, p1_y), ImVec2(p2_x, p2_y), ImVec2(p3_x, p3_y), color, thickness);
+    if (ImDrawList* d = DrawList())
+        d->AddTriangle(ImVec2(p1_x, p1_y), ImVec2(p2_x, p2_y), ImVec2(p3_x, p3_y), color, thickness, Stroke());
 }
 void mono_ImGUI_GetWindowDrawList_AddTriangleFilled(float p1_x, float p1_y, float p2_x, float p2_y, float p3_x, float p3_y,
                                                     unsigned int color) {
@@ -624,7 +678,8 @@ void mono_ImGUI_GetWindowDrawList_AddTriangleFilled(float p1_x, float p1_y, floa
 // here.
 void mono_ImGUI_GetWindowDrawList_AddCircle(float center_x, float center_y, float radius, unsigned int color,
                                             int num_segments, float thickness) {
-    if (ImDrawList* d = DrawList()) d->AddCircle(ImVec2(center_x, center_y), radius, color, num_segments, thickness);
+    if (ImDrawList* d = DrawList())
+        d->AddCircle(ImVec2(center_x, center_y), radius, color, num_segments, thickness, Stroke());
 }
 void mono_ImGUI_GetWindowDrawList_AddCircleFilled(float center_x, float center_y, float radius, unsigned int color,
                                                   int num_segments) {
@@ -632,7 +687,8 @@ void mono_ImGUI_GetWindowDrawList_AddCircleFilled(float center_x, float center_y
 }
 void mono_ImGUI_GetWindowDrawList_AddNgon(float center_x, float center_y, float radius, unsigned int color,
                                           int num_segments, float thickness) {
-    if (ImDrawList* d = DrawList()) d->AddNgon(ImVec2(center_x, center_y), radius, color, num_segments, thickness);
+    if (ImDrawList* d = DrawList())
+        d->AddNgon(ImVec2(center_x, center_y), radius, color, num_segments, thickness, Stroke());
 }
 void mono_ImGUI_GetWindowDrawList_AddNgonFilled(float center_x, float center_y, float radius, unsigned int col,
                                                 int num_segments) {
@@ -641,7 +697,8 @@ void mono_ImGUI_GetWindowDrawList_AddNgonFilled(float center_x, float center_y, 
 void mono_ImGUI_GetWindowDrawList_AddEllipse(float center_x, float center_y, float radius_x, float radius_y,
                                              unsigned int col, float rot, int num_segments, float thickness) {
     if (ImDrawList* d = DrawList())
-        d->AddEllipse(ImVec2(center_x, center_y), ImVec2(radius_x, radius_y), col, rot, num_segments, thickness);
+        d->AddEllipse(ImVec2(center_x, center_y), ImVec2(radius_x, radius_y), col, rot, num_segments, thickness,
+                      Stroke());
 }
 void mono_ImGUI_GetWindowDrawList_AddEllipseFilled(float center_x, float center_y, float radius_x, float radius_y,
                                                    unsigned int col, float rot, int num_segments) {
@@ -653,16 +710,28 @@ void mono_ImGUI_GetWindowDrawList_AddBezierCubic(float p1_x, float p1_y, float p
                                                  int num_segments) {
     if (ImDrawList* d = DrawList())
         d->AddBezierCubic(ImVec2(p1_x, p1_y), ImVec2(p2_x, p2_y), ImVec2(p3_x, p3_y), ImVec2(p4_x, p4_y), col, thickness,
-                          num_segments);
+                          num_segments, Stroke());
 }
 void mono_ImGUI_GetWindowDrawList_AddBezierQuadratic(float p1_x, float p1_y, float p2_x, float p2_y, float p3_x,
                                                      float p3_y, unsigned int col, float thickness, int num_segments) {
     if (ImDrawList* d = DrawList())
-        d->AddBezierQuadratic(ImVec2(p1_x, p1_y), ImVec2(p2_x, p2_y), ImVec2(p3_x, p3_y), col, thickness, num_segments);
+        d->AddBezierQuadratic(ImVec2(p1_x, p1_y), ImVec2(p2_x, p2_y), ImVec2(p3_x, p3_y), col, thickness, num_segments,
+                              Stroke());
 }
 void mono_ImGUI_GetWindowDrawList_AddText(float x, float y, uint32_t color, MonoString* text) {
     ImDrawList* d = DrawList();
     if (d && text) d->AddText(ImVec2(x, y), color, Str(text).c_str());
+}
+
+// ---- the Dear ImGui a script draws with
+
+int mono_ImGUI_GetVersionNum() { return IMGUI_VERSION_NUM; }
+bool mono_ImGUI_HasDocking() {
+#ifdef IMGUI_HAS_DOCK
+    return true;
+#else
+    return false;
+#endif
 }
 
 } // namespace
@@ -910,4 +979,8 @@ void RegisterImGuiInternalCalls() {
     // Texture creation from raw data
     HSMONO_ICALL("MonoCore.E3ImGUI::mq_CreateTextureFromData", mono_CreateTextureFromData);
     HSMONO_ICALL("MonoCore.E3ImGUI::mq_DestroyTexture", mono_DestroyTexture);
+
+    // HSMono's own: which Dear ImGui the script's enums must match (E3ImGUI.ImGuiVersion.Init). MQ2Mono has neither.
+    HSMONO_ICALL("MonoCore.E3ImGUI::imgui_GetVersionNum", mono_ImGUI_GetVersionNum);
+    HSMONO_ICALL("MonoCore.E3ImGUI::imgui_HasDocking", mono_ImGUI_HasDocking);
 }
