@@ -510,6 +510,18 @@ MonoArray* mono_GetSpellIds(MonoString* spellName) {
     return out;
 }
 
+// mq_Delay: the calling script gets no OnPulse for `milliseconds` (OnPulse checks m_delayTimer, as MQ2Mono's does).
+// E3 calls it from its OnPulse to hand its worker thread the time. Asks nothing of the client, so any thread may call
+// it; from the root domain it does nothing (MQ2Mono would make an empty script entry there).
+// A negative delay is taken as 0: MQ2Mono stored it, and a script with a negative m_delayTime never pulsed again.
+void mono_Delay(int32_t milliseconds) {
+    monoAppDomainInfo* script = CurrentScript();
+    if (!script) return;
+    if (milliseconds < 0) milliseconds = 0;
+    script->m_delayTimer = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+    script->m_delayTime = milliseconds;
+}
+
 } // namespace
 
 // mono_runtime.h. The namespace and classes are fixed by the C# side: MonoCore.Core here, MonoCore.E3ImGUI in
@@ -520,7 +532,7 @@ void RegisterInternalCalls() {
     HSMONO_ICALL("MonoCore.Core::mq_ParseTLO", mono_ParseTLO);
     HSMONO_ICALL("MonoCore.Core::mq_DoCommand", mono_DoCommand);
     HSMONO_ICALL("MonoCore.Core::mq_DoCommandDelayed", mono_DoCommandDelayed);
-    // HSMONO_ICALL("MonoCore.Core::mq_Delay", mono_Delay);
+    HSMONO_ICALL("MonoCore.Core::mq_Delay", mono_Delay);
     HSMONO_ICALL("MonoCore.Core::mq_AddCommand", mono_AddCommand);
     HSMONO_ICALL("MonoCore.Core::mq_ClearCommands", mono_ClearCommands);
     HSMONO_ICALL("MonoCore.Core::mq_RemoveCommand", mono_RemoveCommand);
