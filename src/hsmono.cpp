@@ -479,6 +479,37 @@ unsigned char* mono_GetSpellsDataByName(MonoString* name, int32_t* length) {
     return spellsByNameData.data();
 }
 
+// mq_GetSpellIds: the ids of every spell named `spellName` (any case, the whole name), as an int[] in the calling
+// script's domain: get_spells_by_name_data_bulk's records, their ids alone. Read into a buffer of its own (made once,
+// kept), not mq_GetSpellsDataByName's, which a script may still be reading.
+// MQ2Mono's map compared names without case too; it gave them in no set order, this lowest id first. Empty for no such
+// spell, without 'read', or from a thread Hailstone answers nothing on.
+MonoArray* mono_GetSpellIds(MonoString* spellName) {
+    static std::vector<unsigned char> records(64 * 1024);
+    std::vector<int32_t> ids;
+    const std::string wanted = Utf8(spellName);
+    if (!wanted.empty() && MayCallHost() && HAILSTONE_HOST_HAS(host, get_spells_by_name_data_bulk)) {
+        const int32_t n = ReadSpells(records, 0, -1, [&](unsigned char* out, int32_t size) {
+            return host->get_spells_by_name_data_bulk(host->host, wanted.c_str(), out, size);
+        });
+        int32_t count = 0;
+        if (n >= HS_BULK_SPELL_HEADER_SIZE) std::memcpy(&count, records.data(), sizeof count);
+        size_t at = HS_BULK_SPELL_HEADER_SIZE;
+        for (int32_t i = 0; i < count && at + HS_BULK_SPELL_RECORD_SIZE <= static_cast<size_t>(n); ++i) {
+            HS_BulkSpellFixedRecord record;
+            std::memcpy(&record, records.data() + at, sizeof record);
+            if (record.recordSize < HS_BULK_SPELL_RECORD_SIZE) break;
+            if (record.found) ids.push_back(record.id);
+            at += static_cast<size_t>(record.recordSize);
+        }
+    }
+    MonoDomain* d = mono.mono_domain_get();
+    MonoArray* out = mono.mono_array_new(d ? d : g_rootDomain, mono.mono_get_int32_class(), ids.size());
+    for (size_t i = 0; i < ids.size(); ++i)
+        std::memcpy(mono.mono_array_addr_with_size(out, sizeof(int32_t), i), &ids[i], sizeof(int32_t));
+    return out;
+}
+
 } // namespace
 
 // mono_runtime.h. The namespace and classes are fixed by the C# side: MonoCore.Core here, MonoCore.E3ImGUI in
@@ -512,7 +543,7 @@ void RegisterInternalCalls() {
     HSMONO_ICALL("MonoCore.Core::mq_GetXtargetInfo", mono_GetXtargetInfo);
     HSMONO_ICALL("MonoCore.Core::mq_GetAvailableAAIds", mono_GetAvailableAAIds);
     HSMONO_ICALL("MonoCore.Core::mq_GetAvilableDiscIds", mono_GetAvilableDiscIds);
-    // HSMONO_ICALL("MonoCore.Core::mq_GetSpellIds", mono_GetSpellIds);
+    HSMONO_ICALL("MonoCore.Core::mq_GetSpellIds", mono_GetSpellIds);
 
     // HSMONO_ICALL("MonoCore.Core::mq_GetRunNextCommand", mono_GetRunNextCommand);
     // HSMONO_ICALL("MonoCore.Core::mq_GetFocusedWindowName", mono_GetFocusedWindowName);
