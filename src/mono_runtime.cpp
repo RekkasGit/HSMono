@@ -129,6 +129,24 @@ namespace {
         return std::nullopt;
     }
 
+    // What a player can do when no Mono was usable: install one, or point hsmono.ini at one. Nothing is kept from a
+    // failed search, so the next /mono load looks again (the ini, the installed places) and starts Mono if it is
+    // there now.
+    std::string HowToGetMono(const fs::path& config) {
+        std::string out = "\nHSMono needs the Mono runtime. Either:";
+#if defined(_WIN32)
+        out += "\n  install Mono for Windows, 64-bit (mono-project.com), or";
+#elif defined(__APPLE__)
+        out += "\n  install Mono (mono-project.com's installer, or Homebrew: brew install mono), or";
+#else
+        out += "\n  install Mono with your distribution's package manager (it provides libmonosgen-2.0.so.1), or";
+#endif
+        out += std::string("\n  set monodirectory= in ") + (config.empty() ? std::string("hsmono.ini") : Utf8(config / "hsmono.ini")) +
+               " to a Mono folder holding " + kMonoLibrary + ", lib/mono/4.5/mscorlib.dll and etc/mono/config";
+        out += "\nThen /mono load the script again; Hailstone need not restart.";
+        return out;
+    }
+
     const char* BindAll(void* library) {
 #define HSMONO_BIND(f)                                                    \
     mono.f = reinterpret_cast<decltype(mono.f)>(FindSymbol(library, #f)); \
@@ -214,7 +232,9 @@ std::optional<std::string> InitMono() {
         }
 
         // From here on this candidate is the one: a second Mono in the same process would not work.
-        if (const char* missing = BindAll(handle)) return configured + "\n" + where + " is missing " + missing;
+        if (const char* missing = BindAll(handle))
+            return configured + "\n" + where + " is missing " + missing + " (not a Mono runtime HSMono can use)" +
+                   HowToGetMono(ConfigDir());
 
         // Loaded again after /plugin unload: the runtime is still up in this process, so join it.
         if (MonoDomain* existing = mono.mono_get_root_domain()) {
@@ -249,7 +269,7 @@ std::optional<std::string> InitMono() {
         if (build) mono.mono_free(build);
         return std::nullopt;
     }
-    std::string message = configured + "\nNo usable Mono runtime. Tried:";
+    std::string message = configured + "\nNo usable Mono runtime was found. Tried:";
     for (const std::string& line : skipped) message += "\n  " + line;
-    return message;
+    return message + HowToGetMono(ConfigDir());
 }
