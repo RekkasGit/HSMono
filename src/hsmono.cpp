@@ -552,6 +552,37 @@ unsigned char* mono_GetBuffData(int32_t* bufferLength) {
     return buffData;
 }
 
+// mq_GetPetBuffData: the pet window's buffs, MQ2Mono's 12 bytes each: i32 spell id, tics left, spell type.
+// get_pet_buff_data_bulk writes that record (HS_BulkPetBuffData), one per buff the window shows, in the order the
+// server sent them (not by slot, and no empty slots between).
+// E3 reads e3util.MaxPetBuffSlots (30) records whenever the length is above 0, without checking it, and skips a spell
+// id of 0. So when there is at least one buff the list is padded with all-zero records to 30, and E3 never reads past
+// what was written. Whether MQ2Mono's list holds the window's empty slots too is not confirmed here; zero records read
+// as empty to every reader that skips id 0, as E3 does.
+// The list comes from OP_PetBuffWindow, and a stock server sends at most 30 slots in it (EQEmu's
+// Mob::SendPetBuffsToClient, PET_BUFF_COUNT), so the padded list is the whole window. The client's decoder takes up to
+// 97 slots (kMaxSpawnBuffSlots), which the buffer has room for: a server that sends more has all of them copied.
+static_assert(sizeof(HS_BulkPetBuffData) == 12 && HAILSTONE_PET_BUFF_RECORD_SIZE == 12, "mq_GetPetBuffData's record is MQ2Mono's");
+constexpr int32_t kPetBuffPadRecords = 30;   // E3's e3util.MaxPetBuffSlots
+unsigned char petBuffData[2048];   // 170 records: the decoder's 97 with room to spare; the scripts read it after the call
+
+unsigned char* mono_GetPetBuffData(int32_t* bufferLength) {
+    int32_t written = 0;
+    if (MayCallHost() && HAILSTONE_HOST_HAS(host, get_pet_buff_data_bulk)) {
+        const int32_t n = host->get_pet_buff_data_bulk(host->host, petBuffData, static_cast<int32_t>(sizeof petBuffData));
+        if (n > 0) {
+            written = n - n % HAILSTONE_PET_BUFF_RECORD_SIZE;
+            constexpr int32_t padded = kPetBuffPadRecords * HAILSTONE_PET_BUFF_RECORD_SIZE;
+            if (written < padded) {
+                std::memset(petBuffData + written, 0, static_cast<size_t>(padded - written));
+                written = padded;
+            }
+        }
+    }
+    if (bufferLength) *bufferLength = written;   // 0: no pet buffs, no 'read', or a thread Hailstone won't answer on
+    return petBuffData;
+}
+
 } // namespace
 
 // mono_runtime.h. The namespace and classes are fixed by the C# side: MonoCore.Core here, MonoCore.E3ImGUI in
@@ -579,7 +610,7 @@ void RegisterInternalCalls() {
     // HSMONO_ICALL("MonoCore.Core::mq_GetOnAddSpawnsBuffer", mono_GetOnAddSpawnsBuffer);
 
     HSMONO_ICALL("MonoCore.Core::mq_GetBuffData", mono_GetBuffData);
-    // HSMONO_ICALL("MonoCore.Core::mq_GetPetBuffData", mono_GetPetBuffData);
+    HSMONO_ICALL("MonoCore.Core::mq_GetPetBuffData", mono_GetPetBuffData);
     // HSMONO_ICALL("MonoCore.Core::mq_GetTargetBuffData", mono_GetTargetBuffData);
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns3_Delta", mono_GetSpawns3_Delta);
     HSMONO_ICALL("MonoCore.Core::mq_GetXtargetInfo", mono_GetXtargetInfo);
