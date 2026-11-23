@@ -583,6 +583,60 @@ unsigned char* mono_GetPetBuffData(int32_t* bufferLength) {
     return petBuffData;
 }
 
+// mq_GetTargetBuffData(spawnId): MQ2Mono's u8 "buffs populated", then one record per buff of the target: i32 spell id,
+// tics left, spell type, caster name length, then that many bytes of the caster's name (no NUL). E3 reads it that way
+// (Casting.cs TimeLeftOnMySpell, HudHubWindow), always for ${Target.ID}.
+// get_target_buff_data_bulk has a list header and one more field per record (the buff's slot, between the spell type
+// and the name's length), so each record is rewritten without it.
+// The client holds buffs for the current target only, and only once the server has sent them (EQEmu sends them to
+// some players: GMs, Inspect Buffs, leadership, or AlwaysSendTargetsBuffs); the bulk read is empty otherwise. So the
+// list is always the current target's: spawnId is not checked (E3 passes ${Target.ID}). With no records nothing is
+// returned (length 0), whether the target has no buffs or they were not sent; else the flag is 1. E3 reads the flag
+// only to step past it.
+static_assert(sizeof(HS_BulkTargetBuffFixedRecord) == HAILSTONE_TARGET_BUFF_RECORD_SIZE && HAILSTONE_TARGET_BUFF_RECORD_SIZE == 20,
+    "the client's target buff record");
+static_assert(sizeof(HS_BulkListHeader) == HS_BULK_LIST_HEADER_SIZE, "the list header");
+unsigned char targetBuffData[8192];   // as MQ2Mono's: the scripts read it after the call (each call rewrites it)
+
+unsigned char* mono_GetTargetBuffData(int32_t /*spawnId*/, int32_t* bufferLength) {
+    size_t written = 0;
+    if (MayCallHost() && HAILSTONE_HOST_HAS(host, get_target_buff_data_bulk)) {
+        targetBuffData[written++] = 1;   // the flag; nothing is returned without a record
+        // A stock server's worst case is 4988 bytes (60 NPC buff slots, 63-byte names); a longer list (the
+        // header's total past its count) is read once more into a buffer big enough.
+        static std::vector<unsigned char> list(8192);
+        HS_BulkListHeader header{};
+        int32_t filled = 0;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            filled = host->get_target_buff_data_bulk(host->host, list.data(), static_cast<int32_t>(list.size()));
+            if (filled < HS_BULK_LIST_HEADER_SIZE) { filled = 0; break; }
+            std::memcpy(&header, list.data(), sizeof header);
+            if (header.count >= header.total) break;
+            list.resize(list.size() * 2);
+        }
+        size_t at = HS_BULK_LIST_HEADER_SIZE;
+        for (int32_t i = 0; filled > 0 && i < header.count; ++i) {
+            if (at + HAILSTONE_TARGET_BUFF_RECORD_SIZE > static_cast<size_t>(filled)) break;
+            HS_BulkTargetBuffFixedRecord record;
+            std::memcpy(&record, list.data() + at, sizeof record);
+            at += HAILSTONE_TARGET_BUFF_RECORD_SIZE;
+            const size_t nameBytes = record.casterNameLength > 0 ? static_cast<size_t>(record.casterNameLength) : 0;
+            if (at + nameBytes > static_cast<size_t>(filled)) break;
+            if (written + 16 + nameBytes > sizeof targetBuffData) break;   // whole records only
+            const int32_t fields[4] = { record.spellID, record.duration, record.spellType,
+                                        static_cast<int32_t>(nameBytes) };
+            std::memcpy(targetBuffData + written, fields, sizeof fields);
+            written += sizeof fields;
+            if (nameBytes) std::memcpy(targetBuffData + written, list.data() + at, nameBytes);
+            written += nameBytes;
+            at += nameBytes;
+        }
+        if (written == 1) written = 0;
+    }
+    if (bufferLength) *bufferLength = static_cast<int32_t>(written);   // 0: no target buffs, no 'read', or a thread Hailstone won't answer on
+    return targetBuffData;
+}
+
 } // namespace
 
 // mono_runtime.h. The namespace and classes are fixed by the C# side: MonoCore.Core here, MonoCore.E3ImGUI in
@@ -611,7 +665,7 @@ void RegisterInternalCalls() {
 
     HSMONO_ICALL("MonoCore.Core::mq_GetBuffData", mono_GetBuffData);
     HSMONO_ICALL("MonoCore.Core::mq_GetPetBuffData", mono_GetPetBuffData);
-    // HSMONO_ICALL("MonoCore.Core::mq_GetTargetBuffData", mono_GetTargetBuffData);
+    HSMONO_ICALL("MonoCore.Core::mq_GetTargetBuffData", mono_GetTargetBuffData);
     // HSMONO_ICALL("MonoCore.Core::mq_GetSpawns3_Delta", mono_GetSpawns3_Delta);
     HSMONO_ICALL("MonoCore.Core::mq_GetXtargetInfo", mono_GetXtargetInfo);
     HSMONO_ICALL("MonoCore.Core::mq_GetAvailableAAIds", mono_GetAvailableAAIds);
