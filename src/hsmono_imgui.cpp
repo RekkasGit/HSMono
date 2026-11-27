@@ -536,13 +536,34 @@ void mono_ImGUI_Image(void* textureId, float width, float height) {
 void* mono_CreateTextureFromData(MonoArray*, int, int, int) { return nullptr; }
 void mono_DestroyTexture(void*) {}
 
-// MQ draws the game's A_SpellGems animation. A plugin has no way to draw a spell icon in ImGui yet (the client's only
-// icon service is for nameplates), so this takes the icon's space and draws nothing. Needs a client host function.
-void mono_ImGUI_DrawSpellIconByIconIndex(int iconIndex, float size) {
-    if (iconIndex >= 0) ImGui::Dummy(ImVec2(size, size));
+// The spell's icon, size x size, as the client's own windows draw it (the host's ui_icon). MQ2Mono draws the cell
+// from A_SpellGems; here the number is a cell of A_SpellIcons, which is what Hailstone's ${Spell.SpellIcon} and the
+// spell records give (MQ's SpellIcon). Without the icon (a client without ui_icon, a cell or sheet the game folder
+// lacks) the icon's space is taken and nothing drawn, so the layout holds; MQ2Mono draws nothing there.
+void DrawSpellIcon(int32_t icon, float size) {
+    HailstoneUiImage image{};
+    image.size = sizeof image;
+    if (HAILSTONE_HOST_HAS(host, ui_icon) && host->ui_icon(host->host, HAILSTONE_UI_ICON_SPELL, icon, &image)) {
+        ImGui::Image(ImTextureRef(static_cast<ImTextureID>(image.texture)), ImVec2(size, size),
+                     ImVec2(image.u0, image.v0), ImVec2(image.u1, image.v1));
+        return;
+    }
+    ImGui::Dummy(ImVec2(size, size));
 }
+void mono_ImGUI_DrawSpellIconByIconIndex(int iconIndex, float size) {
+    if (iconIndex >= 0) DrawSpellIcon(iconIndex, size);
+}
+// The spell's spell_icon (get_spell). A client older than HailstoneSpell's spell_icon leaves the -1: the space only.
 void mono_ImGUI_DrawSpellIconBySpellID(int spellId, float size) {
-    if (spellId > 0) ImGui::Dummy(ImVec2(size, size));
+    if (spellId <= 0) return;
+    HailstoneSpell spell{};
+    spell.size = sizeof spell;
+    spell.spell_icon = -1;
+    if (host->get_spell(host->host, static_cast<uint32_t>(spellId), &spell) && spell.spell_icon >= 0) {
+        DrawSpellIcon(spell.spell_icon, size);
+        return;
+    }
+    ImGui::Dummy(ImVec2(size, size));
 }
 
 // ---- fonts
