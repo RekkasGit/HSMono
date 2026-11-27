@@ -7,6 +7,7 @@
 #include "hsmono.hpp"
 
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -1022,6 +1023,108 @@ HAILSTONE_API void ShutdownPlugin(void) {
     hs::RemoveAllTopLevelObjects();
 }
 
+namespace {
+
+bool AllHex(std::string_view s) {
+    for (char c : s)
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+    return true;
+}
+
+// MQ's CleanItemTags, as MQ2Mono gives each line to the scripts: each \x12 tag \x12 replaced by the text it shows.
+// Tag code '0' is an item: a body of 7 ids and 20 more hex digits, then its name; stock RoF2 writes the ids with 5
+// digits (55 in all), a server with large item ids with 8 (76). '3' is an achievement, its text after the first
+// apostrophe. Any other code: its text. An unclosed tag stays as it is.
+std::string CleanItemTags(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    while (!text.empty()) {
+        const size_t open = text.find('\x12');
+        const size_t close = open == std::string_view::npos ? open : text.find('\x12', open + 1);
+        if (close == std::string_view::npos) {
+            out.append(text);
+            break;
+        }
+        out.append(text.substr(0, open));
+        std::string_view tag = text.substr(open + 1, close - open - 1);
+        text.remove_prefix(close + 1);
+        if (tag.empty()) continue;
+        const char code = tag.front();
+        tag.remove_prefix(1);
+        if (code == '0') {
+            for (size_t body : {size_t{76}, size_t{55}})
+                if (tag.size() >= body && AllHex(tag.substr(0, body))) {
+                    tag.remove_prefix(body);
+                    break;
+                }
+        } else if (code == '3') {
+            const size_t apostrophe = tag.find('\'');
+            tag = apostrophe == std::string_view::npos ? std::string_view("Achievement") : tag.substr(apostrophe + 1);
+        }
+        out.append(tag);
+    }
+    return out;
+}
+
+// MQ's StripMQChat, as MQ2Mono gives a plugin's or script's line to the scripts: its colour codes taken out. \a then a
+// letter (\ax among them), \a- then a letter, \a#rrggbb; a \a with anything else after it goes alone.
+std::string StripMQChat(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] != '\a') {
+            out += text[i];
+            continue;
+        }
+        const std::string_view rest = text.substr(i + 1);
+        if (rest.size() >= 7 && rest[0] == '#' && AllHex(rest.substr(1, 6))) i += 7;
+        else if (rest.size() >= 2 && rest[0] == '-' && std::isalpha(static_cast<unsigned char>(rest[1]))) i += 2;
+        else if (!rest.empty() && std::isalpha(static_cast<unsigned char>(rest[0]))) i += 1;
+    }
+    return out;
+}
+
+// A line for the scripts: game chat (OnIncomingChat) or a plugin's or script's (OnWriteChatColor).
+struct ScriptChat {
+    bool written;   // a plugin's or script's line
+    std::string text;
+};
+
+// Lines that came while a script's call was running (a command it ran answered at once): given at the next pulse,
+// outside any C# code, as the /mono lines are.
+std::deque<ScriptChat> pendingChat;
+
+void DeliverChat(const ScriptChat& line) {
+    for (auto& [name, script] : monoAppDomains) {
+        MonoMethod* method = line.written ? script.m_OnWriteChatColor : script.m_OnIncomingChat;
+        if (!method || !script.m_appDomain) continue;
+        MonoString* text = mono.mono_string_new(script.m_appDomain, line.text.c_str());
+        void* params[1] = {text};
+        Invoke(script, method, line.written ? "OnWriteChatColor" : "OnIncomingChat", params);
+    }
+}
+
+void RunPendingChat() {
+    std::deque<ScriptChat> lines;
+    lines.swap(pendingChat);
+    for (const ScriptChat& line : lines) DeliverChat(line);
+}
+
+// In the game only, as MQ2Mono; while a script's call runs, kept for the next pulse.
+void ChatToScripts(bool written, const char* line) {
+    if (!g_rootDomain || !line || monoAppDomains.empty()) return;
+    const std::optional<HailstonePlayer> player = hs::GetPlayer();
+    if (!player || player->game_state != GAMESTATE_INGAME) return;
+    ScriptChat chat{written, CleanItemTags(written ? StripMQChat(line) : std::string(line))};
+    if (InScriptCall()) {
+        if (pendingChat.size() < 1000) pendingChat.push_back(std::move(chat));   // (a runaway script: the rest dropped)
+        return;
+    }
+    DeliverChat(chat);
+}
+
+} // namespace
+
 HAILSTONE_API void OnPulse(void) {
     if (!g_rootDomain) return;   // Mono isn't running: no /mono yet
     if (offThreadCall.exchange(false, std::memory_order_relaxed)) {
@@ -1034,6 +1137,7 @@ HAILSTONE_API void OnPulse(void) {
     }
     RunPendingMonoCommands();
     RunDelayedCommands();
+    RunPendingChat();
     previousCommand = false;
     if (appDomainProcessQueue.empty()) return;
 
@@ -1081,10 +1185,22 @@ HAILSTONE_API void OnZoned(void) {
     WriteChatf("[HSMono] zoned");
 }
 
+// MQ2Mono's OnIncomingChat: each line of game chat, its tags cleaned, to every script's OnIncomingChat(string) (E3's
+// events read them: "<name> invites you to join a group." among them). The client gives no plugin's or script's line
+// here: those come to OnIncomingPluginScriptChat.
 HAILSTONE_API int OnIncomingChat(const char* line, uint32_t color) {
-    (void)line;
     (void)color;
     ++chats;
+    ChatToScripts(false, line);
+    return 0;
+}
+
+// MQ2Mono's OnWriteChatColor: each line a plugin or script wrote (this plugin's scripts' own too: mq_Echo), its colour
+// codes and tags taken out, to every script's OnWriteChatColor(string) (E3's MQ events). A line a script writes from
+// inside that call is not handed back (the client does not call this one again from inside it).
+HAILSTONE_API int OnIncomingPluginScriptChat(const char* line, uint32_t color) {
+    (void)color;
+    ChatToScripts(true, line);
     return 0;
 }
 

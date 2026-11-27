@@ -597,8 +597,7 @@ void* mono_ImGUI_AddFontFromFileTTF(MonoString* path, float size_pixels, const u
 
 float mono_ImGUI_Style_GetFontSizeBase() { return ImGui::GetStyle().FontSizeBase; }
 
-// By the font's name in the client's atlas. An empty name with a size keeps the current font at that size. The client
-// ships MQ's "RobotoRegular" and "RobotoRegular (Large)", with FontAwesome 4.7 merged in (E3's "robo").
+// By the font's name in the client's atlas. An empty name with a size keeps the current font at that size.
 bool mono_ImGUI_PushFont(MonoString* name, float font_size) {
     const std::string wanted = Str(name);
     if (wanted.empty() && font_size > 0) {
@@ -613,16 +612,8 @@ bool mono_ImGUI_PushFont(MonoString* name, float font_size) {
     return false;
 }
 
-// MQ's GetEQImFont: EverQuest's font table (0 .. 10), which the client hands out (ui_font); at its own size when
-// `size` is 0. False, and nothing pushed, for a font the client lacks (as MQ2Mono for a missing one), and on a client
-// without ui_font. E3's "EQ-Thin" is 4 and "EQ-Bold" 10.
-bool mono_ImGUI_PushEQFont(int fontId, float size) {
-    if (!HAILSTONE_HOST_HAS(host, ui_font)) return false;
-    ImFont* font = static_cast<ImFont*>(host->ui_font(host->host, HAILSTONE_UI_FONT_EQ, fontId));
-    if (!font) return false;
-    ImGui::PushFont(font, size > 0 ? size : font->LegacySize);
-    return true;
-}
+// MQ's EverQuest fonts: Hailstone has none to give a plugin, so nothing is pushed (false, as MQ2Mono for a missing one).
+bool mono_ImGUI_PushEQFont(int, float) { return false; }
 
 void mono_ImGUI_PopFont() { ImGui::PopFont(); }
 
