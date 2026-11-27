@@ -7,6 +7,7 @@
 #include "hsmono.hpp"
 
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -237,6 +238,91 @@ void mono_DoCommand(MonoString* text) {
 void mono_DoCommandDelayed(MonoString* text) {
     previousCommand = true;
     QueueCommand(Utf8(text));
+}
+
+// mq_LookAt and the numbers it reads and writes as text. Not strtof or snprintf: Mono may set the C locale to the
+// system's, whose decimal separator need not be '.', and the client's ${...} and commands always use '.'.
+
+// A number as ${...} gives one ("-12.50"); nullopt for anything else (NULL).
+std::optional<float> TloNumber(std::string_view s) {
+    bool negative = false;
+    if (!s.empty() && (s.front() == '-' || s.front() == '+')) {
+        negative = s.front() == '-';
+        s.remove_prefix(1);
+    }
+    double value = 0, scale = 0;
+    bool digits = false;
+    for (char ch : s) {
+        if (ch == '.' && scale == 0) {
+            scale = 1;
+        } else if (ch >= '0' && ch <= '9') {
+            digits = true;
+            if (scale == 0) {
+                value = value * 10 + (ch - '0');
+            } else {
+                scale /= 10;
+                value += (ch - '0') * scale;
+            }
+        } else {
+            return std::nullopt;
+        }
+    }
+    if (!digits || !std::isfinite(value)) return std::nullopt;
+    return static_cast<float>(negative ? -value : value);
+}
+
+// A finite number with two decimals, '.' between ("-12.50").
+std::string CommandNumber(float f) {
+    const long long hundredths = std::llround(static_cast<double>(f) * 100.0);
+    const unsigned long long a = hundredths < 0 ? 0ull - static_cast<unsigned long long>(hundredths)
+                                                : static_cast<unsigned long long>(hundredths);
+    std::string out = hundredths < 0 ? "-" : "";
+    out += std::to_string(a / 100);
+    out += '.';
+    out += static_cast<char>('0' + a / 10 % 10);
+    out += static_cast<char>('0' + a % 10);
+    return out;
+}
+
+void RunCommandNow(std::string line) {
+    if (HostAnswersHere()) DoCommand(line.c_str());
+    else QueueCommand(std::move(line));
+}
+
+// mq_LookAt(X, Y, Z), in ${Me.X}, ${Me.Y}, ${Me.Z}'s terms (E3 follows a path with it): face the point and set the
+// look angle, as MQ2Mono's mono_LookAt. While the feet are wet the look points at it (its Z against the player's Z
+// less 0.9 of ${Me.Height}); levitating, straight up (64) or down (-64) when it is more than 5 above or below; else
+// level. MQ2Mono writes the heading and CameraAngle itself; here /face and /look do it (the 'move' capability).
+// ${Me.Height} is Hailstone's (its size), where MQ2Mono reads AvatarHeight.
+void mono_LookAt(float x, float y, float z) {
+    if (!MayCallHost() || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return;
+    char state[256];
+    state[0] = '\0';
+    if (ParseMacroData("${Me.FeetWet} ${Me.Levitating} ${Me.X} ${Me.Y} ${Me.Z} ${Me.Height}", state, sizeof state) < 0)
+        return;
+    std::string_view words[6];
+    std::string_view rest = state;
+    for (std::string_view& w : words) {
+        const size_t end = rest.find(' ');
+        w = rest.substr(0, end);
+        rest = end == std::string_view::npos ? std::string_view() : rest.substr(end + 1);
+    }
+    const std::optional<float> meX = TloNumber(words[2]), meY = TloNumber(words[3]), meZ = TloNumber(words[4]);
+    if (!meX || !meY || !meZ) return;   // not in a zone
+    const bool feetWet = words[0] == "TRUE";
+    const bool levitating = words[1] == "TRUE";
+
+    float angle = 0.0f;
+    if (feetWet) {
+        const float height = TloNumber(words[5]).value_or(0.0f);
+        const float distance = std::hypot(x - *meX, y - *meY);
+        angle = static_cast<float>(std::atan2(z - *meZ - height * 0.9f, distance) * 256.0 / 3.14159265358979323846);
+    } else if (levitating) {
+        if (z < *meZ - 5) angle = -64.0f;
+        else if (z > *meZ + 5) angle = 64.0f;
+    }
+    RunCommandNow("/face fast loc " + CommandNumber(y) + "," + CommandNumber(x));   // /face loc takes Y first
+    RunCommandNow("/look " + CommandNumber(angle));
 }
 
 // mq_AddCommand, mq_RemoveCommand, mq_ClearCommands: the calling script's own commands (its domain's,
@@ -909,7 +995,7 @@ void RegisterInternalCalls() {
 
     // HSMONO_ICALL("MonoCore.Core::mq_ExecuteCommandByName", mono_ExecuteCommandByName);
     // HSMONO_ICALL("MonoCore.Core::mq_ExecuteCommand", mono_ExecuteCommand);
-    // HSMONO_ICALL("MonoCore.Core::mq_LookAt", mono_LookAt);
+    HSMONO_ICALL("MonoCore.Core::mq_LookAt", mono_LookAt);
     HSMONO_ICALL("MonoCore.Core::mq_Memory_GetPageFileSize", mono_Memory_GetPageFileSize);
 
     RegisterImGuiInternalCalls();
