@@ -75,6 +75,8 @@ struct monoAppDomainInfo
 	int m_delayTime = 0; // amount of time in milliseconds that was set by C#
 	std::chrono::steady_clock::time_point m_delayTimer = std::chrono::steady_clock::now(); // the time this was issued + m_delayTime
 	std::deque<std::string> m_CommandList;
+	// The client's performance window rows for its calls ("<name> pulse", "<name> imgui"; ReportSection).
+	std::string m_pulseSection, m_imguiSection;
 
 	// mq_AddCommand: a command that runs the script's OnCommand with the whole line. False when the name is taken
 	// (the game's, the client's, another plugin's or another script's). app_domains.cpp.
@@ -123,6 +125,12 @@ void UnloadAllScripts();
 // ${HSMono.Query[name,expression]}: the named script's OnQuery(expression) (any case of the name, as /mono). Empty
 // when no such script runs, it has no OnQuery, it threw (reported once, as any call) or it returned null.
 std::string QueryScript(std::string_view name, const std::string& expression);
+
+// The client's performance window: the time since `started` to the row "Plugin HSMono/<name>" (the SDK's
+// frame_section), on a client that has it. Called only after a script's call ran, so a frame in which a script waits
+// (mq_Delay) has no time in its row and the table shows how often it ran. hsmono.cpp.
+void ReportSection(std::string& name, const std::string& script, const char* what,
+                   std::chrono::steady_clock::time_point started);
 
 // ---- internal calls
 

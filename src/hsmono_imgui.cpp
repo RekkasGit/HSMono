@@ -9,6 +9,7 @@
 // yet).
 #include "hsmono.hpp"
 
+#include <chrono>
 #include <cstring>
 #include <deque>
 #include <initializer_list>
@@ -788,8 +789,10 @@ void RunScriptsImGui() {
         // script's windows and the client's own don't nest in it. The client does the same for Lua scripts.
         ImGuiErrorRecoveryState state;
         ImGui::ErrorRecoveryStoreState(&state);
+        const auto started = std::chrono::steady_clock::now();
         Invoke(script, script.m_OnUpdateImGui, "OnUpdateImGui");
         ImGui::ErrorRecoveryTryToRecoverState(&state);
+        ReportSection(script.m_imguiSection, name, "imgui", started);
     }
 }
 

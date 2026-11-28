@@ -1125,6 +1125,14 @@ void ChatToScripts(bool written, const char* line) {
 
 } // namespace
 
+void ReportSection(std::string& name, const std::string& script, const char* what,
+                   std::chrono::steady_clock::time_point started) {
+    if (!HAILSTONE_HOST_HAS(host, frame_section)) return;
+    if (name.empty()) name = script + " " + what;
+    const auto ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - started).count();
+    host->frame_section(host->host, name.c_str(), ms);
+}
+
 HAILSTONE_API void OnPulse(void) {
     if (!g_rootDomain) return;   // Mono isn't running: no /mono yet
     if (offThreadCall.exchange(false, std::memory_order_relaxed)) {
@@ -1167,7 +1175,11 @@ HAILSTONE_API void OnPulse(void) {
         monoAppDomainInfo& script = it->second;
         // mq_Delay: no OnPulse until its time is up
         if (script.m_delayTime > 0 && std::chrono::steady_clock::now() > script.m_delayTimer) script.m_delayTime = 0;
-        if (script.m_delayTime == 0) Invoke(script, script.m_OnPulseMethod, "OnPulse");
+        if (script.m_delayTime == 0 && script.m_OnPulseMethod) {
+            const auto started = std::chrono::steady_clock::now();
+            Invoke(script, script.m_OnPulseMethod, "OnPulse");
+            ReportSection(script.m_pulseSection, key, "pulse", started);
+        }
 
         if (previousCommand) break;
         if (std::chrono::steady_clock::now() > processingTimer + std::chrono::milliseconds(_milisecondsToProcess) ||
